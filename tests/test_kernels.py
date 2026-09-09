@@ -175,12 +175,12 @@ class TestDensification:
         with pytest.raises(KernelError, match="INVALID_PARAMS"):
             run_densification(DensificationParams(cycle=None), ctx)
 
-    def test_csv_artifact_written_to_job_dir(self, ctx: RunContext):
+    def test_csv_artifact_written_to_artifacts_dir(self, ctx: RunContext):
         # Act
         result = run_densification(make_densification_params(), ctx)
         # Assert
         assert result["artifacts"] == ["densification-curve.csv"]
-        csv_path = ctx.job_dir / "densification-curve.csv"
+        csv_path = ctx.job_dir / "artifacts" / "densification-curve.csv"
         assert csv_path.is_file()
         lines = csv_path.read_text(encoding="utf-8").strip().splitlines()
         assert lines[0] == "time_s,relative_density"
@@ -371,7 +371,7 @@ class TestCompensate:
         assert result["scale_factors"]["x"] == pytest.approx(scale, rel=1e-6)
         assert scale == pytest.approx(1.1426, abs=1e-3)
         output = Path(result["output_step_path"])
-        assert output == ctx.job_dir / "compensated.step"
+        assert output == ctx.job_dir / "artifacts" / "compensated.step"
         assert output.is_file()
         assert result["artifacts"] == ["compensated.step"]
         before_size = result["bounding_box"]["before"]["size_mm"]

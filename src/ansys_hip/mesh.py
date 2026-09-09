@@ -50,7 +50,9 @@ _GMSH_LOCK = threading.Lock()
 def _gmsh_session() -> Iterator[None]:
     """持有模块锁并完成 gmsh init/finalize(gmsh 全局 API 必须串行)。"""
     with _GMSH_LOCK:
-        gmsh.initialize()
+        # interruptible=False:跳过 gmsh 的 SIGINT 处理器注册(仅主线程合法;
+        # 服务内核经 asyncio.to_thread 在工作线程执行)
+        gmsh.initialize(interruptible=False)
         gmsh.option.setNumber("General.Terminal", 0)
         try:
             yield

@@ -231,8 +231,8 @@ class TestRunMeshKernel:
         assert result["fidelity"] == "real"
         assert result["node_count"] > 0
         assert all("/" not in name for name in result["artifacts"])
-        assert (tmp_path / "capsule_powder.cdb").is_file()
-        assert (tmp_path / "capsule_powder.stl").is_file()
+        assert (tmp_path / "artifacts" / "capsule_powder.cdb").is_file()
+        assert (tmp_path / "artifacts" / "capsule_powder.stl").is_file()
 
     def test_run_mesh_requires_capsule(self, tmp_path):
         params = MeshMethodParams(geometry=GeometryRef(capsule_step=None))

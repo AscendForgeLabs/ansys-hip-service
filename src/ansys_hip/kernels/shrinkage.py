@@ -16,6 +16,7 @@ from typing import Iterator
 
 import gmsh
 
+from . import artifact_dir
 from ..registry import KernelError
 from ..schemas import CompensateParams, RunContext, ShrinkageEstimateParams
 
@@ -62,7 +63,9 @@ def _gmsh_session() -> Iterator[object]:
     """独占 gmsh 会话:进入前清理残留实例,退出必 finalize(防与其他内核串扰)。"""
     if gmsh.isInitialized():
         gmsh.finalize()
-    gmsh.initialize()
+    # interruptible=False:跳过 gmsh 的 SIGINT 处理器注册(仅主线程合法;
+    # 本服务内核经 asyncio.to_thread 在工作线程执行)
+    gmsh.initialize(interruptible=False)
     try:
         gmsh.option.setNumber("General.Terminal", 0)
         yield gmsh
@@ -115,7 +118,7 @@ def run_compensate(params: CompensateParams, ctx: RunContext) -> dict:
         raise KernelError("GEOMETRY_NOT_FOUND", f"型腔 STEP 文件不存在: {cavity_step}")
 
     scale = (params.final_relative_density / params.initial_relative_density) ** (1.0 / 3.0)
-    target = ctx.job_dir / COMPENSATED_STEP_FILENAME
+    target = artifact_dir(ctx) / COMPENSATED_STEP_FILENAME
     before, after = _scale_step_file(source, target, scale)
 
     return {

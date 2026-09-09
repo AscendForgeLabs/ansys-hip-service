@@ -196,3 +196,37 @@ def test_real_material_query_end_to_end(client: TestClient) -> None:
     for row in result["rows"]:
         assert "young_modulus_gpa" in row["properties"]
     assert result["source_notes"]
+
+
+def test_real_compensate_end_to_end_in_worker_thread(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """回归:gmsh.initialize 默认注册 SIGINT 处理器,仅主线程合法 —
+    服务内核经 asyncio.to_thread 在工作线程执行,必须 interruptible=False。"""
+    import gmsh
+
+    gmsh.initialize()
+    try:
+        gmsh.model.occ.addBox(0, 0, 0, 10, 20, 30)
+        gmsh.model.occ.synchronize()
+        gmsh.write(str(tmp_path / "cavity.step"))
+    finally:
+        gmsh.finalize()
+
+    accepted = submit(
+        client,
+        "compensate",
+        {"params": {"geometry": {"cavity_step": str(tmp_path / "cavity.step")}}},
+    )
+    state = wait_for_terminal(client, accepted["id"], timeout_s=120.0)
+    assert state["status"] == "succeeded", state
+
+    result = client.get(f"/jobs/{accepted['id']}/result").json()
+    assert result["fidelity"] == "real"
+    assert "scale_factors" in result
+    assert result["artifacts"], "compensate 应产出补偿后 STEP 工件"
+    artifact_name = result["artifacts"][0] if isinstance(result["artifacts"][0], str) \
+        else result["artifacts"][0]["name"]
+    download = client.get(f"/jobs/{accepted['id']}/artifacts/{artifact_name}")
+    assert download.status_code == 200
+    assert b"MANIFOLD_SOLID_BREP" in download.content[:4000]

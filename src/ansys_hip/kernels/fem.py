@@ -23,7 +23,12 @@ from ..apdl.material_apdl import elastic_at_temperature, material_commands
 from ..apdl.render import write_input
 from ..mesh import exterior_faces_from_cdb, mesh_capsule_powder, step_bbox
 from ..registry import KernelError
-from ..results import parse_series_csv, parse_summary_csv
+from ..results import (
+    SERIES_FILENAME,
+    SUMMARY_FILENAME,
+    parse_series_csv,
+    parse_summary_csv,
+)
 from ..runner import run_mapdl
 from ..schemas import (
     AxisymHipParams,
@@ -37,6 +42,7 @@ from ..schemas import (
     Numerics,
     RunContext,
 )
+from . import artifact_dir, publish_artifacts
 from .materials import load_material
 
 logger = logging.getLogger(__name__)
@@ -74,7 +80,7 @@ def run_mesh(params: MeshMethodParams, ctx: RunContext) -> dict:
         cavity_step=geometry.cavity_step if params.derive_powder_domain else None,
         mesh_size_mm=params.mesh.mesh_size_mm,
         out_formats=params.output_formats,
-        workdir=ctx.job_dir,
+        workdir=artifact_dir(ctx),
     )
     return {
         "node_count": result["node_count"],
@@ -136,7 +142,9 @@ def run_axisym_thermal(params: AxisymThermalParams, ctx: RunContext) -> dict:
     return {
         "probes": [{"name": name, **curves[name]} for name in names],
         "max_lag_c": round(_max_probe_lag(rows), 6),
-        "artifacts": ["axisym_thermal.inp", "series.csv", "summary.csv"],
+        "artifacts": ["axisym_thermal.inp", *publish_artifacts(
+            ctx, (SERIES_FILENAME, SUMMARY_FILENAME)
+        )],
         "fidelity": "real",
     }
 
@@ -175,7 +183,9 @@ def run_axisym_hip(params: AxisymHipParams, ctx: RunContext) -> dict:
         "displacement_max_mm": _summary_float(summary, "displacement_max_mm"),
         "von_mises_max_mpa": _summary_float(summary, "von_mises_max_mpa"),
         "time_history": time_history,
-        "artifacts": ["axisym_hip.inp", "series.csv", "summary.csv"],
+        "artifacts": ["axisym_hip.inp", *publish_artifacts(
+            ctx, (SERIES_FILENAME, SUMMARY_FILENAME)
+        )],
         "fidelity": "smoke",
     }
 
@@ -216,7 +226,9 @@ def run_axisym_mechanical(params: AxisymMechanicalParams, ctx: RunContext) -> di
         "displacement_max_mm": _summary_float(summary, "displacement_max_mm"),
         "von_mises_max_mpa": _summary_float(summary, "von_mises_max_mpa"),
         "section_stress": section_stress,
-        "artifacts": ["axisym_mechanical.inp", "series.csv", "summary.csv"],
+        "artifacts": ["axisym_mechanical.inp", *publish_artifacts(
+            ctx, (SERIES_FILENAME, SUMMARY_FILENAME)
+        )],
         "fidelity": "smoke",
     }
 
@@ -235,9 +247,9 @@ def run_full3d_hip(params: Full3dHipParams, ctx: RunContext) -> dict:
         cavity_step=geometry.cavity_step,
         mesh_size_mm=params.mesh.mesh_size_mm,
         out_formats=("cdb",),
-        workdir=ctx.job_dir,
+        workdir=artifact_dir(ctx),
     )
-    cdb_path = ctx.job_dir / f"{CDB_STEM}.cdb"
+    cdb_path = artifact_dir(ctx) / f"{CDB_STEM}.cdb"
     pressure_faces = exterior_faces_from_cdb(cdb_path)
     if not pressure_faces:
         raise KernelError("INTERNAL", "未能从 .cdb 提取外边界面(网格退化?)")
@@ -267,7 +279,9 @@ def run_full3d_hip(params: Full3dHipParams, ctx: RunContext) -> dict:
         "displacement_max_mm": _summary_float(summary, "displacement_max_mm"),
         "von_mises_max_mpa": _summary_float(summary, "von_mises_max_mpa"),
         "deformed_stl": None,  # 阶段 2(UPGEOM+变形网格导出);见汇报缺陷记录
-        "artifacts": [f"{CDB_STEM}.cdb", "full3d_hip.inp", "summary.csv"],
+        "artifacts": [f"{CDB_STEM}.cdb", "full3d_hip.inp", *publish_artifacts(
+            ctx, (SUMMARY_FILENAME,)
+        )],
         "fidelity": "smoke",
     }
 
@@ -277,8 +291,8 @@ def run_full3d_hip(params: Full3dHipParams, ctx: RunContext) -> dict:
 # ---------------------------------------------------------------------------
 
 def _execute(template_name: str, inp_name: str, ctx: RunContext, **context: Any) -> Path:
-    """渲染模板 → 写 inp → 交 runner 批处理(超时/许可/取消统一治理)。"""
-    inp_path = write_input(template_name, ctx.job_dir / inp_name, **context)
+    """渲染模板 → 写 inp(入 artifacts/)→ 交 runner 批处理(超时/许可/取消统一治理)。"""
+    inp_path = write_input(template_name, artifact_dir(ctx) / inp_name, **context)
     run_mapdl(inp_path, ctx.job_dir, ctx, ctx.job_dir.name)
     return inp_path
 

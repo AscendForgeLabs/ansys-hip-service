@@ -20,6 +20,7 @@ import numpy as np
 from pydantic import ValidationError
 from scipy.integrate import solve_ivp
 
+from . import artifact_dir
 from ..registry import KernelError
 from ..schemas import (
     Cycle,
@@ -277,7 +278,7 @@ def run_densification(params: DensificationParams, ctx: RunContext) -> dict:
     )
     final_density = float(densities[-1])
 
-    _write_curve_csv(ctx.job_dir / DENSIFICATION_CSV, sample_times, densities)
+    _write_curve_csv(artifact_dir(ctx) / DENSIFICATION_CSV, sample_times, densities)
 
     return {
         "initial_relative_density": params.initial_relative_density,
