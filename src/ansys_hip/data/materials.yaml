@@ -1,0 +1,97 @@
+# ansys_hip 材料库 — 阶段 1 文献初值
+#
+# schema(冻结,T4 的 APDL 材料库按同一结构读取,勿改):
+#   materials.<name>.display_name        展示名
+#   materials.<name>.density_kg_m3       密度
+#   materials.<name>.properties.<prop>   [{temperature_c, value}] 点列,查询时线性插值
+#   materials.<name>.source_notes        数据来源与不确定度说明
+#
+# 属性键:young_modulus_gpa / yield_stress_mpa / ultimate_stress_mpa /
+#         thermal_conductivity_w_m_k / specific_heat_j_kgk / poisson_ratio
+# (温度弱相关属性用单点点列表示常量,插值端点钳位即恒值;后续改温变只需加点)
+materials:
+  tc4:
+    display_name: "TC4(Ti-6Al-4V)粉末/烧结体"
+    density_kg_m3: 4430
+    properties:
+      young_modulus_gpa:
+        - {temperature_c: 20, value: 113.0}
+        - {temperature_c: 400, value: 95.0}
+        - {temperature_c: 600, value: 85.0}
+        - {temperature_c: 800, value: 75.0}
+        - {temperature_c: 900, value: 70.0}
+      yield_stress_mpa:
+        - {temperature_c: 20, value: 800.0}
+        - {temperature_c: 400, value: 550.0}
+        - {temperature_c: 600, value: 350.0}
+        - {temperature_c: 800, value: 80.0}
+        - {temperature_c: 900, value: 40.0}
+      ultimate_stress_mpa:
+        - {temperature_c: 20, value: 950.0}
+        - {temperature_c: 400, value: 650.0}
+        - {temperature_c: 600, value: 420.0}
+        - {temperature_c: 800, value: 100.0}
+        - {temperature_c: 900, value: 50.0}
+      thermal_conductivity_w_m_k:
+        - {temperature_c: 20, value: 7.0}
+        - {temperature_c: 400, value: 11.0}
+        - {temperature_c: 600, value: 14.0}
+        - {temperature_c: 800, value: 18.0}
+        - {temperature_c: 900, value: 20.0}
+      specific_heat_j_kgk:
+        - {temperature_c: 20, value: 550.0}
+        - {temperature_c: 400, value: 600.0}
+        - {temperature_c: 600, value: 650.0}
+        - {temperature_c: 800, value: 680.0}
+        - {temperature_c: 900, value: 700.0}
+      poisson_ratio:
+        - {temperature_c: 20, value: 0.34}
+    source_notes: >-
+      阶段 1 文献初值(不确定度约 ±10–20%,供快速计算与 FEM 冒烟;阶段 2 用实验数据替换)。
+      室温屈服 800 MPa / 抗拉 950 MPa 为用户给定值;室温弹性模量 113 GPa 为 TC4 公认值。
+      泊松比取常值 0.34(温度弱相关,单点点列表示)。
+      其余高温值为文献估计:900℃ E≈70 GPa、σy≈30–50 MPa(取 40,粉末烧结态偏软)、σb≈50 MPa;
+      热导率 7(室温)→20 W/(m·K)(900℃);比热 550→700 J/(kg·K)。
+      高温强度数据分散度大,精确计算前建议实验复校。
+  20steel:
+    display_name: "20 号低碳钢(包套)"
+    density_kg_m3: 7850
+    properties:
+      young_modulus_gpa:
+        - {temperature_c: 20, value: 205.0}
+        - {temperature_c: 400, value: 185.0}
+        - {temperature_c: 600, value: 165.0}
+        - {temperature_c: 800, value: 140.0}
+        - {temperature_c: 900, value: 120.0}
+      yield_stress_mpa:
+        - {temperature_c: 20, value: 250.0}
+        - {temperature_c: 400, value: 180.0}
+        - {temperature_c: 600, value: 120.0}
+        - {temperature_c: 800, value: 50.0}
+        - {temperature_c: 900, value: 25.0}
+      ultimate_stress_mpa:
+        - {temperature_c: 20, value: 410.0}
+        - {temperature_c: 400, value: 360.0}
+        - {temperature_c: 600, value: 210.0}
+        - {temperature_c: 800, value: 70.0}
+        - {temperature_c: 900, value: 35.0}
+      thermal_conductivity_w_m_k:
+        - {temperature_c: 20, value: 50.0}
+        - {temperature_c: 400, value: 45.0}
+        - {temperature_c: 600, value: 38.0}
+        - {temperature_c: 800, value: 32.0}
+        - {temperature_c: 900, value: 30.0}
+      specific_heat_j_kgk:
+        - {temperature_c: 20, value: 460.0}
+        - {temperature_c: 400, value: 530.0}
+        - {temperature_c: 600, value: 590.0}
+        - {temperature_c: 800, value: 660.0}
+        - {temperature_c: 900, value: 700.0}
+      poisson_ratio:
+        - {temperature_c: 20, value: 0.30}
+    source_notes: >-
+      20 号低碳结构钢包套,阶段 1 文献初值(不确定度约 ±10–15%)。
+      关键点:900℃ 屈服仅 ~20–30 MPa(取 25)—— HIP 高温下包套近似柔性传压介质,
+      这是忽略包套反力、按外压直接作用于粉末的快速模型依据。
+      弹性模量 205 GPa(室温)→120 GPa(900℃,文献估计);热导率 50→30 W/(m·K);
+      比热 460→700 J/(kg·K)。高温段为文献估计,精确计算前建议实验复校。

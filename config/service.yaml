@@ -17,6 +17,7 @@ queue:
 
 storage:
   jobs_dir: var/jobs
+  uploads_dir: var/uploads   # POST /uploads 几何文件落盘位置
   retention_days: 3     # 完成作业保留 3 天后清理
 
 # 全局默认(零件配置/请求可覆盖)

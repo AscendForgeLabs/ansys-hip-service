@@ -124,7 +124,7 @@ REGISTRY: dict[str, MethodSpec] = {
         status="available",
         fidelity="real",
         summary="均匀收缩估算:由 D0→Df 体积守恒 (D0/Df)^(1/3) 给各特征尺寸的收缩量与收缩率",
-        returns="{items{name,length_mm,shrunk_mm,shrink_ratio}[], linear_strain, fidelity}",
+        returns="{items{name,length_mm,final_mm,shrink_mm,shrink_ratio}[], linear_strain, fidelity}",
         typical_runtime="<1 s",
         requires_mapdl=False,
         requires_geometry=False,
@@ -209,7 +209,7 @@ REGISTRY: dict[str, MethodSpec] = {
         requires_mapdl=True,
         requires_geometry=True,
         params_model=Full3dHipParams,
-        tags=("SOLID187", "smoke"),
+        tags=("SOLID45", "smoke"),  # 阶段 1 一阶单元;阶段 2 升 SOLID187
     ),
     # ---- 反演/优化 ----
     "calibrate": MethodSpec(

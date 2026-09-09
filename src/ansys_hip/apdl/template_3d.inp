@@ -1,0 +1,54 @@
+/BATCH
+! ============================================================
+! 3D 全模型 HIP(阶段 1 冒烟:真实网格+线弹性)— SOLID45
+! 网格读自命令流 .cdb(/INPUT;MAT 1=powder 2=capsule 已随单元赋好)
+! 外表面均压:Python 侧从 .cdb 提取外边界面 → SFE 逐面直加(绕开 ESURF)
+! 3-2-1 点约束防刚体位移;summary.csv 给位移/等效应力极值
+! 生成: ansys-hip-service kernels/fem.py(template_3d.inp)
+! ============================================================
+/PREP7
+! ---- 材料(保温温度单值线弹性;1=powder 2=capsule) ----
+{% for line in material_lines %}
+{{ line }}
+{% endfor %}
+! ---- 网格(命令流: ET,1,SOLID45 + N + MAT/E) ----
+/INPUT,{{ cdb_stem }},cdb
+! ---- 3-2-1 点约束(NODE 取包围盒角部最近节点) ----
+n1 = NODE({{ anchor_1[0]|g }},{{ anchor_1[1]|g }},{{ anchor_1[2]|g }})
+D,n1,UX,0 $ D,n1,UY,0 $ D,n1,UZ,0
+n2 = NODE({{ anchor_2[0]|g }},{{ anchor_2[1]|g }},{{ anchor_2[2]|g }})
+D,n2,UY,0 $ D,n2,UZ,0
+n3 = NODE({{ anchor_3[0]|g }},{{ anchor_3[1]|g }},{{ anchor_3[2]|g }})
+D,n3,UZ,0
+{% if nlgeom %}NLGEOM,1{% else %}NLGEOM,0{% endif %}
+/SOLU
+ANTYPE,STATIC
+! ---- 外表面均压(全部外边界面;面号与 E 序缺失节点位置对应) ----
+{% for elem, face in pressure_faces %}
+SFE,{{ elem }},{{ face }},PRES,,{{ hold_pressure_mpa|g }}
+{% endfor %}
+TIME,1
+NSUBST,1
+OUTRES,ALL,ALL
+SOLVE
+/POST1
+SET,LAST
+NSORT,U,X,0,1
+*GET,uxm,SORT,,MAX
+NSORT,U,Y,0,1
+*GET,uym,SORT,,MAX
+NSORT,U,Z,0,1
+*GET,uzm,SORT,,MAX
+dmax = MAX(MAX(uxm,uym),uzm)
+ETABLE,vmse,S,EQV
+ESORT,ETAB,vmse
+*GET,vmax,SORT,,MAX
+*CFOPEN,summary,csv
+*VWRITE,'displacement_max_mm',dmax
+(A32,',',E16.8)
+*VWRITE,'von_mises_max_mpa',vmax
+(A32,',',E16.8)
+*VWRITE,'hold_pressure_mpa',{{ hold_pressure_mpa|g }}
+(A32,',',E16.8)
+*CFCLOSE
+FINISH

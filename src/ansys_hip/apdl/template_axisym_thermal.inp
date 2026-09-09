@@ -1,0 +1,77 @@
+/BATCH
+! ============================================================
+! 2D 轴对称热瞬态(真实内核)— PLANE77 温度相关 KXX/C 表
+! 外表面温度沿工艺曲线分段坡道(KBC,0);探针 *GET T-t → series.csv
+! 生成: ansys-hip-service kernels/fem.py(template_axisym_thermal.inp)
+! 单位: mm / s / ℃;KXX=mW/(mm·K),C=mJ/(tonne·K),DENS=tonne/mm³
+! ============================================================
+/PREP7
+ET,1,PLANE77
+KEYOPT,1,3,1                 ! 轴对称
+! ---- 径向分区矩形 + 共形粘接 ----
+{% for zone in zones %}
+RECTNG,{{ zone.r_from|g }},{{ zone.r_to|g }},{{ z_from|g }},{{ z_to|g }}
+{% endfor %}
+AGLUE,ALL
+! ---- 材料(MPTEMP/MPDATA 点列表) ----
+{% for block in material_blocks %}
+{{ block }}
+{% endfor %}
+! ---- 分区赋材料(按面质心 X 选取;1=powder 2=capsule) ----
+ALLSEL,ALL
+{% for zone in zones %}
+ASEL,S,LOC,X,{{ zone.sel_lo|g }},{{ zone.sel_hi|g }}
+AATT,{{ zone.mat }},1,0
+{% endfor %}
+ALLSEL,ALL
+ESIZE,{{ mesh_size_mm|g }}
+AMESH,ALL
+! ---- 探针节点(归一化 (r,z) 已换算物理坐标;NODE 取最近节点) ----
+{% for probe in probes %}
+npr{{ probe.index }} = NODE({{ probe.r|g }},{{ probe.z|g }})
+vmax{{ probe.index }} = {{ initial_temp_c|g }}
+{% endfor %}
+! ---- 初始温度 ----
+TUNIF,{{ initial_temp_c|g }}
+/SOLU
+ANTYPE,TRANS
+TIMINT,1                     ! 全热瞬态
+KBC,0                        ! 分段内坡道过渡
+OUTRES,ALL,ALL
+{% for segment in segments %}
+! ---- 段 {{ loop.index }}: t = {{ segment.t_end|g }} s,外表面 {{ segment.temp|g }} ℃ ----
+LSEL,S,LOC,X,{{ outer_r|g }}
+SFL,ALL,TEMP,{{ segment.temp|g }}
+ALLSEL,ALL
+TIME,{{ segment.t_end|g }}
+NSUBST,{{ segment.nsub }}
+SOLVE
+/POST1
+SET,LAST
+tcur = {{ segment.t_end|g }}
+{% for probe in probes %}
+*GET,vpr{{ probe.index }},NODE,npr{{ probe.index }},TEMP
+vmax{{ probe.index }} = MAX(vmax{{ probe.index }},vpr{{ probe.index }})
+{% endfor %}
+{% if loop.first %}*CFOPEN,series,csv{% else %}*CFOPEN,series,csv,,,APPEND{% endif %}
+{% for probe in probes %}
+*VWRITE,tcur,{{ probe.index }},vpr{{ probe.index }}
+(E16.8,',',I2,',',E16.8)
+{% endfor %}
+*CFCLOSE
+/SOLU
+{% endfor %}
+/POST1
+SET,LAST
+tfinal = {{ segments[-1].t_end|g }}
+*CFOPEN,summary,csv
+*VWRITE,'time_final_s',tfinal
+(A32,',',E16.8)
+{% for probe in probes %}
+*VWRITE,'max_temp_probe_{{ probe.index }}_c',vmax{{ probe.index }}
+(A32,',',E16.8)
+*VWRITE,'final_temp_probe_{{ probe.index }}_c',vpr{{ probe.index }}
+(A32,',',E16.8)
+{% endfor %}
+*CFCLOSE
+FINISH
