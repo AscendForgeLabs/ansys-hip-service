@@ -1,0 +1,41 @@
+# ansys-hip-service 主配置(网关级唯一主文件)
+# 覆盖优先级: 请求内联参数 > config/parts/<零件>.yaml > 本文件默认
+# 所有路径均可被同名环境变量覆盖(见 settings.py: HIP_SERVICE_CONFIG / ANSYS_BIN / ANSYSLMD_LICENSE_FILE ...)
+
+server:
+  host: 0.0.0.0        # 跨机器可调用(内网免鉴权,勿暴露公网)
+  port: 8010
+
+ansys:
+  bin: /ansys/ansys_inc/v221/ansys/bin/ansys221
+  license_file: /usr/ansys_inc/shared_files/licensing/license_files/ansyslmd.lic
+  np: 4                 # 4 核 VM;跨机器部署时按目标机调整
+  job_timeout_s: 14400  # 单个 MAPDL 作业超时(4h)
+
+queue:
+  max_concurrent: 1     # 单许可 → 并发=1
+
+storage:
+  jobs_dir: var/jobs
+  retention_days: 3     # 完成作业保留 3 天后清理
+
+# 全局默认(零件配置/请求可覆盖)
+defaults:
+  cycle:                # 规格: 900℃ / 120 MPa / 保温保压 3 h
+    points:
+      - {time_s: 0,     temperature_c: 20,  pressure_mpa: 0}
+      - {time_s: 3600,  temperature_c: 900, pressure_mpa: 120}
+      - {time_s: 14400, temperature_c: 900, pressure_mpa: 120}
+      - {time_s: 16200, temperature_c: 200, pressure_mpa: 10}
+      - {time_s: 18000, temperature_c: 20,  pressure_mpa: 0}
+  materials:
+    powder: tc4
+    capsule: 20steel
+  mesh:
+    mesh_size_mm: 6.0
+  densification:
+    initial_relative_density: 0.65
+    limiting_relative_density: 0.995
+
+methods:
+  disabled: []          # 例: ["full3d-hip"] 可临时下线某方法
