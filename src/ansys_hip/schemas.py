@@ -427,6 +427,26 @@ class SimAccepted(BaseModel):
     status_url: str = Field(..., description="轮询地址(GET /jobs/{id})", examples=["/jobs/9d2f..."])
 
 
+class JobStage(BaseModel):
+    """作业阶段进度条目(progress.csv 侧车的读时投影)。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    label: str = Field(
+        ...,
+        min_length=1,
+        max_length=8,
+        description="阶段短标签(APDL *VWRITE 字符字面量 ≤8 字符约束,如 HEAT/HOLD/COOL)",
+        examples=["HEAT"],
+    )
+    time_s: float = Field(
+        ...,
+        ge=0,
+        description="该阶段完成时刻的累计耗时(秒)",
+        examples=[3600],
+    )
+
+
 class JobState(BaseModel):
     """GET /jobs/{id} 响应。"""
 
@@ -445,6 +465,13 @@ class JobState(BaseModel):
     result_url: str | None = Field(default=None, description="结果端点(GET /jobs/{id}/result;仅 succeeded 可取)")
     artifacts_url: str | None = Field(
         default=None, description="工件列表端点(GET /jobs/{id}/artifacts,含下载链接拼法)"
+    )
+    stages: list[JobStage] | None = Field(
+        default=None,
+        description="已完成阶段序列(progress.csv 侧车读时投影):pending 或无侧车的作业为 "
+                    "None(如全部既有方法),running 期间实时反映,终态为末帧快照;"
+                    "当前阶段与百分比由客户端按序列派生,服务不猜测",
+        examples=[[{"label": "HEAT", "time_s": 3600}, {"label": "HOLD", "time_s": 7200}]],
     )
 
 

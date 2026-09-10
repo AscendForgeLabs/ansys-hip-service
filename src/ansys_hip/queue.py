@@ -28,6 +28,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from .registry import Executor, KernelError, MethodSpec
+from .results import parse_progress_csv
 from .schemas import ErrorBody, Fidelity, JobState, JobStatusEnum, RunContext
 from .settings import Settings
 
@@ -146,7 +147,12 @@ class JobQueue:
         return self._jobs.get(job_id)
 
     def state(self, record: JobRecord) -> JobState:
-        """JobState 快照(含标准子资源 URL)。"""
+        """JobState 快照(含标准子资源 URL)。
+
+        stages 为读时投影:每次组装响应时解析 job_dir 根的 progress.csv 侧车,
+        无后台轮询协程、不写 state.json、无状态迁移 — 文件不存在(尚无侧车,
+        如全部既有方法)自然得 None;终态后文件在盘上保留,快照即末帧。
+        """
         return JobState(
             id=record.id,
             method=record.method,
@@ -160,6 +166,7 @@ class JobQueue:
             log_url=f"/jobs/{record.id}/log",
             result_url=f"/jobs/{record.id}/result",
             artifacts_url=f"/jobs/{record.id}/artifacts",
+            stages=parse_progress_csv(record.job_dir),
         )
 
     def counts(self) -> tuple[int, int]:

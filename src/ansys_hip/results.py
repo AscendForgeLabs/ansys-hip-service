@@ -7,19 +7,29 @@
                  模板按探针分块顺序追加(行序不影响解析)
     results.csv  两列标签,数值(可选);直通通道上游 inp 自写的关键结果,
                  标签沿用 summary.csv 短标签约定(≤8 字符)
+    progress.csv 两列 label,time_s,无表头;上游 .inp 经 *CFOPEN 覆盖式整文件
+                 重写的进度侧车(队列按读时投影解析,行序 = 阶段完成序)
 
 解析均为纯文本处理,可独立单测,不依赖 MAPDL。
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+from pydantic import ValidationError
+
+from .schemas import JobStage
+
+logger = logging.getLogger(__name__)
 
 # --- 文件名常量(runner / apdl 模板 / kernels 共用,勿散落字面量) ---
 OUT_FILENAME = "job.out"
 SUMMARY_FILENAME = "summary.csv"
 SERIES_FILENAME = "series.csv"
 RESULTS_FILENAME = "results.csv"
+PROGRESS_FILENAME = "progress.csv"
 
 # MAPDL 输出中的错误行特征(job.out 中同时用于 CONVERGENCE_FAILED 诊断)
 ERROR_LINE_KEYWORDS: tuple[str, ...] = ("ERROR", "FATAL")
@@ -100,6 +110,7 @@ def parse_series_csv(job_dir: Path) -> list[dict]:
     return rows
 
 
+<<<<<<< HEAD
 def parse_results_csv(job_dir: Path) -> dict[str, float] | None:
     """读直通通道的 results.csv(标签,数值 两列)→ {标签: 数值}。
 
@@ -122,3 +133,41 @@ def parse_results_csv(job_dir: Path) -> dict[str, float] | None:
         except ValueError:
             continue
     return values
+
+
+def parse_progress_csv(job_dir: Path) -> list[JobStage] | None:
+    """读 progress.csv(label,time_s 两列,无表头)→ 阶段序列;文件不存在 → None。
+
+    侧车由上游 .inp 用 *CFOPEN 覆盖式整文件重写,读时可能撞上写一半:
+    撕裂半行与任何不满足 JobStage 约束的坏行(列数错/时间非浮点/空或超
+    8 字符标签/负耗时)一律跳过并记日志,只返回可完整解析的阶段。
+    读盘失败(权限/句柄占用等)→ None 并告警,不拖垮状态查询;
+    文件存在但无完整行(首帧撕裂)→ [],语义上区别于 None(无侧车)。
+    """
+    path = Path(job_dir) / PROGRESS_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning("读取 %s 失败,按无侧车处理: %r", path, exc)
+        return None
+    stages: list[JobStage] = []
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        stage = _parse_stage_row(raw)
+        if stage is None:
+            logger.warning("%s 第 %d 行无法解析,已跳过: %r", path, line_no, raw)
+            continue
+        stages.append(stage)
+    return stages
+
+
+def _parse_stage_row(raw: str) -> JobStage | None:
+    """单行 → JobStage;撕裂/坏行返回 None(记日志由调用方统一处理)。"""
+    fields = [field.strip() for field in raw.split(",")]
+    if len(fields) != 2:
+        return None
+    try:
+        return JobStage(label=fields[0], time_s=float(fields[1]))
+    except (ValueError, ValidationError):
+        return None
