@@ -8,6 +8,7 @@
 | 文件 | 角色 |
 |---|---|
 | `capsule_shrink.inp` | 入口命令流:PLANE183 轴对称;`RECTNG` 自建粉末/包套两区 + `AGLUE` + `AATT`(MAT 1=powder、2=capsule 约定);线弹性占位本构(演示通道,**不背书 HIP 物理**);`NLGEOM,1`;4 段升压载荷步循环;每段写一帧 `frame_N.csv` + 整文件重写 `progress.csv`;末尾写 `deform.csv`(变形几何数据)与 `results.csv`(短标签标量) |
+| `vm1_axial_bar.inp` | **官方 Verification Manual VM1 已知答案 E2E 夹具**:两端固定直杆轴向加载(LINK180,官方命令流形态);官方目标反力 900/600 lb + 解析位移 8.0e-5 / 9.0e-5 in 写进 `results.csv`;写 `progress.csv`(MODEL/SOLVE/POST)与 `disp.csv`(declared)。单位故意保留官方原制 in/lbf/psi —— 验证服务不预设单位制 |
 | `submit_demo.py` | httpx 提交脚本:上传 → 提交 → 轮询打印 status+stages → 流式下载工件;注释里有逐阶段等价 curl |
 | `README.md` | 本文件 |
 
@@ -56,6 +57,41 @@ watch -n3 'curl -s http://localhost:8010/jobs/<id>'   # 盯 status 与 stages
 | `job.out` | MAPDL 输出(无条件) | 错误分析 |
 
 量级参考(线弹性占位本构,仅验证通道):`shrink_r` ≈ 2% 量级的径向收缩。
+
+## VM1 官方算例 E2E(已知答案)
+
+`capsule_shrink.inp` 只验证"通道打得通";`vm1_axial_bar.inp` 在此之上提供
+**数值级**端到端验证 —— 算例与目标值均出自官方(Ansys Mechanical APDL
+Verification Manual VM1,参考解 Timoshenko p.26 prob.10),跑通后
+`result.values` 逐项对上即证明"忠实转发 + 结果解析"全链路正确。
+
+```bash
+curl -s -F 'file=@vm1_axial_bar.inp' http://localhost:8010/uploads/apdl
+# → {"path": "/var/uploads/xxx_vm1_axial_bar.inp", ...}
+
+curl -s -X POST http://localhost:8010/sim/passthrough \
+  -H 'Content-Type: application/json' \
+  -d '{"params": {"entry_file": "/var/uploads/xxx_vm1_axial_bar.inp",
+        "declared_outputs": ["disp.csv"], "workflow": "VM1_E2E"}}'
+# → 202 {"id": "...", "status_url": "/jobs/..."}
+
+# succeeded 后取结果,values 对照下表:
+curl -s http://localhost:8010/jobs/<id>/result
+```
+
+`values` 断言表(相对误差 < 1e-3 即通过):
+
+| 短标签 | 目标值 | 出处 |
+|---|---|---|
+| `r1_lb` | 900 | y=10 端反力(官方) |
+| `r2_lb` | 600 | y=0 端反力(官方) |
+| `ratio12` | 1.5 | R1/R2 |
+| `u2_in` | 8.0e-5 | 节点 2 位移(解析,A=1 in²、EA=30e6 lb) |
+| `u3_in` | 9.0e-5 | 节点 3 位移(解析,同上) |
+
+同时核对:`stages` 末帧 = `[MODEL, SOLVE, POST]`;工件含
+`disp.csv`(declared)+ `progress.csv` / `results.csv` / 入口回声 / `job.out`(自动)。
+
 
 ## 改模板时注意
 

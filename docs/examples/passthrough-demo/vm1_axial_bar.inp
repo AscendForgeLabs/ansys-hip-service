@@ -1,0 +1,145 @@
+/BATCH
+! ============================================================
+! passthrough 端到端「已知答案」夹具:官方 Verification Manual VM1
+! Statically Indeterminate Reaction Force Analysis(两端固定直杆,
+! 两中间截面轴向加载,求端部反力)
+!
+! 官方来源:
+!   * Ansys Mechanical APDL Verification Manual — VM1:
+!     https://ansyshelp.ansys.com/public/Views/Secured/corp/v252/en/pdf/Ansys_Mechanical_APDL_Verification_Manual.pdf
+!     参考解:Timoshenko, Strength of Materials, Part I, 3rd ed.,
+!     D. Van Nostrand, 1955, p.26, prob.10
+!   * 命令流形态(LINK180 + SECTYPE,替代早期 LINK1)取自官方
+!     ansys/pymapdl-examples 仓库 examples/verif-manual/vm-001-*.py
+!
+! 官方目标值(E2E 断言口径,见 README):
+!   R1(y=10 端) = 900 lb,R2(y=0 端) = 600 lb
+!   解析补充(A = 1 in^2、EA = 30e6 lb):u2 = 8.0e-5 in、u3 = 9.0e-5 in
+!
+! 单位:故意保留官方原制 in / lbf / psi —— 顺带验证 passthrough
+! 不预设单位制(忠实转发,单位自洽归 .inp 作者,passthrough-guide §4.1)。
+!
+! 本文件写出的契约产物(均落作业目录根):
+!   progress.csv = 阶段侧车:MODEL / SOLVE / POST(整文件重写式,§4.4)
+!   disp.csv     = 全节点 y 坐标 + UY 位移表(declared_outputs 声明它)
+!   results.csv  = 短标签标量(服务自动解析进 result.values,§4.5,勿声明)
+!
+! 提交侧参数:declared_outputs = ["disp.csv"];workflow 建议 "VM1_E2E"。
+! 坑自查(*VWRITE 字符字面量 ≤8 字符):
+!   'MODEL' 'SOLVE' 'POST' 'node' 'y_in' 'uy_in'
+!   'r1_lb' 'r2_lb' 'ratio12' 'u2_in' 'u3_in'(全部 ≤8)。
+! ============================================================
+
+/TITLE,VM1 STATICALLY INDETERMINATE REACTION FORCE ANALYSIS
+/PREP7
+ANTYPE,STATIC
+ET,1,LINK180                  ! 3D 杆单元(官方现行 VM1 形态)
+SECTYPE,1,LINK
+SECDATA,1                     ! 截面积 1 in^2
+MP,EX,1,30E6                  ! E = 30e6 psi
+
+! ---- 直杆 y = 0..10 in,中间加载节点 y = 4 与 y = 7 ----
+N,1
+N,2,,4
+N,3,,7
+N,4,,10
+E,1,2
+EGEN,3,1,1                    ! 复制生成单元 2、3
+
+! ---- 边界与载荷(官方原题):两端全约束,-500 lb 与 -1000 lb ----
+D,1,ALL,,,4,3                 ! 约束节点 1 与 4(NINC=3)
+F,2,FY,-500
+F,3,FY,-1000
+FINISH
+
+! ---- 阶段侧车首行:MODEL 完成(单一载荷步默认 TIME=1,建模记 0)----
+NSTG = 3
+*DIM,PGLAB,CHAR,NSTG          ! 阶段标签(≤8 字符)
+*DIM,PGTIM,ARRAY,NSTG         ! 累计分析时间(载荷步口径)
+PGLAB(1) = 'MODEL'
+PGTIM(1) = 0
+*CFOPEN,progress,csv
+JL   = PGLAB(1)
+JTV  = PGTIM(1)
+*VWRITE,JL,JTV
+(A8,',',E16.8)
+*CFCLOSE
+
+/SOLU
+OUTRES,ALL,ALL                ! 供 /POST1 读回
+SOLVE
+FINISH
+
+! ---- 阶段侧车重写:登记 SOLVE(载荷步末分析时间 = 默认 TIME=1)----
+PGLAB(2) = 'SOLVE'
+PGTIM(2) = 1
+*CFOPEN,progress,csv
+*DO,J,1,2
+  JL   = PGLAB(J)
+  JTV  = PGTIM(J)
+  *VWRITE,JL,JTV
+(A8,',',E16.8)
+*ENDDO
+*CFCLOSE
+
+/POST1
+SET,LAST
+
+! ---- 反力:官方后处理套路(NSEL + FSUM + *GET;符号取向不定,取 ABS)----
+NSEL,S,LOC,Y,10               ! y=10 端
+FSUM
+*GET,R1T,FSUM,,ITEM,FY        ! 目标 |R1| = 900 lb
+NSEL,S,LOC,Y,0                ! y=0 端
+FSUM
+*GET,R2T,FSUM,,ITEM,FY        ! 目标 |R2| = 600 lb
+R1A   = ABS(R1T)
+R2A   = ABS(R2T)
+RATIO = R1A/R2A               ! 目标 1.5
+ALLSEL,ALL
+
+! ---- 节点位移(解析已知答案)----
+*GET,U2N,NODE,2,U,Y           ! 目标 8.0e-5 in
+*GET,U3N,NODE,3,U,Y           ! 目标 9.0e-5 in
+
+! ---- disp.csv:全节点 y 坐标 + UY(declared_outputs 声明)----
+*GET,NNOD,NODE,,COUNT
+*DIM,NODNO,ARRAY,NNOD
+*DIM,YLOC,ARRAY,NNOD
+*DIM,UYA,ARRAY,NNOD
+*VGET,NODNO(1),NODE,1,NLIST   ! 节点号
+*VGET,YLOC(1),NODE,1,LOC,Y    ! 原始坐标
+*VGET,UYA(1),NODE,1,U,Y       ! 位移
+*CFOPEN,disp,csv
+*VWRITE,'node','y_in','uy_in'
+(A4,',',A4,',',A5)
+*VWRITE,NODNO(1),YLOC(1),UYA(1)
+(E16.8,',',E16.8,',',E16.8)
+*CFCLOSE
+
+! ---- results.csv:短标签 + 数值(服务自动解析进 result.values,勿声明)----
+*CFOPEN,results,csv
+*VWRITE,'r1_lb',R1A
+(A8,',',E16.8)
+*VWRITE,'r2_lb',R2A
+(A8,',',E16.8)
+*VWRITE,'ratio12',RATIO
+(A8,',',E16.8)
+*VWRITE,'u2_in',U2N
+(A8,',',E16.8)
+*VWRITE,'u3_in',U3N
+(A8,',',E16.8)
+*CFCLOSE
+
+! ---- 阶段侧车末帧重写:登记 POST ----
+PGLAB(3) = 'POST'
+PGTIM(3) = 1
+*CFOPEN,progress,csv
+*DO,J,1,3
+  JL   = PGLAB(J)
+  JTV  = PGTIM(J)
+  *VWRITE,JL,JTV
+(A8,',',E16.8)
+*ENDDO
+*CFCLOSE
+
+FINISH
