@@ -1,0 +1,214 @@
+/BATCH
+! ============================================================
+! passthrough 示范工程:2D 轴对称包套缩放演示(自包含,无外部文件依赖)
+!
+! 用途:上游对接种子参考 + passthrough 通道冒烟(吃自己的狗粮)。
+! 契约要点(详见 docs/passthrough-guide.md 第 4 章):
+!   * MAPDL 以 mapdl -b -i capsule_shrink.inp 执行,cwd = 作业目录根;
+!     本文件写出的所有文件(progress.csv / frame_N.csv / deform.csv /
+!     results.csv)都落在作业目录根,由服务发布进 artifacts/。
+!   * progress.csv = 阶段进度侧车:行 = 阶段短标签(<=8 字符)+ 累计秒;
+!     *CFOPEN 无可靠 APPEND,采用 *DIM 数组自维护 + 整文件重写。
+!   * frame_N.csv = 每载荷段一帧(动画数据,Channel C:数据帧+前端渲染)。
+!   * deform.csv  = 末态节点坐标+位移+变形后坐标(支撑上游 final_powder.step 重构)。
+!   * results.csv = 可选结构化结果(短标签+数值,服务自动解析进 result.values;
+!     无需在 declared_outputs 声明)。
+!   * 坑:*VWRITE 字符字面量标签 <=8 字符,超长被 MAPDL 静默截断。
+!     本文件逐标签自查:'node' 'x_mm' 'y_mm' 'ux_mm' 'uy_mm' 'x0_mm' 'y0_mm'
+!     'xd_mm' 'yd_mm' 'MESH' 'SEG_P10' 'SEG_P40' 'SEG_P80' 'SEG_P120'
+!     'ux_max' 'uy_max' 'shrink_r' 'p_final'(全部 <=8)。
+!
+! 物理:线弹性占位本构 —— 演示通道打通用,不构成对 HIP 物理的背书
+! (结果 fidelity = "passthrough",服务不背书物理内容)。
+! 单位:mm / MPa / s / ℃;MAT 编号遵守全局约定:1 = powder,2 = capsule。
+!
+! 若改动段数 NSEG:提交侧 declared_outputs 的帧文件名须同步改
+! (frame_%I% 生成 frame_1.csv .. frame_<NSEG>.csv)。
+! ============================================================
+
+/PREP7
+ET,1,PLANE183
+KEYOPT,1,3,1                 ! 轴对称选项
+
+! ---- 几何参数(mm):外包套矩形 R50 x H150,壁/顶/底厚 5 ----
+RP   = 45                    ! 粉末外半径
+RC   = 50                    ! 包套外半径
+HGT  = 150                   ! 总高(轴向)
+THK  = 5                     ! 包套壁厚(侧/顶/底同厚,演示取值)
+
+! ---- 载荷参数:4 段升压外压(演示用伪时间轴,每段 600 s) ----
+NSEG = 4
+*DIM,PSEGA,ARRAY,NSEG        ! 各段末外压(MPa)
+PSEGA(1) = 10
+PSEGA(2) = 40
+PSEGA(3) = 80
+PSEGA(4) = 120
+*DIM,TSEGA,ARRAY,NSEG        ! 各段末累计时间(s;写入 progress.csv)
+TSEGA(1) = 600
+TSEGA(2) = 1200
+TSEGA(3) = 1800
+TSEGA(4) = 2400
+*DIM,SEGLAB,CHAR,NSEG        ! 各段进度侧车标签(<=8 字符!)
+SEGLAB(1) = 'SEG_P10'
+SEGLAB(2) = 'SEG_P40'
+SEGLAB(3) = 'SEG_P80'
+SEGLAB(4) = 'SEG_P120'
+
+! ---- 剖面:四矩形拼块(互不重叠、共享边),AGLUE 共形粘接 ----
+RECTNG,0,RP,THK,HGT-THK     ! 粉末芯(MAT 1)
+RECTNG,0,RC,0,THK           ! 包套底板(MAT 2)
+RECTNG,0,RC,HGT-THK,HGT     ! 包套顶板(MAT 2)
+RECTNG,RP,RC,THK,HGT-THK    ! 包套侧环(MAT 2)
+AGLUE,ALL
+
+! ---- 材料(线弹性演示占位,单位 MPa) ----
+MP,EX,1,5000                ! 粉末:5 GPa(柔性占位,演示可见缩放)
+MP,PRXY,1,0.30
+MP,EX,2,120000              ! 包套:120 GPa(钢量级)
+MP,PRXY,2,0.30
+
+! ---- 赋材料:默认全包套(MAT 2),再按质心窗口改粉末芯(MAT 1) ----
+ALLSEL,ALL
+AATT,2,1,0
+ASEL,S,LOC,X,0,RP           ! 质心 X 落在粉末径向范围…
+ASEL,S,LOC,Y,THK,HGT-THK    ! …且质心 Y 落在侧壁之间(逐步 ASEL,S = 交集)
+AATT,1,1,0
+ALLSEL,ALL
+
+! ---- 网格 + 节点紧编号(NUMCMP 后节点号 1..NNOD 连续,便于向量写出) ----
+ESIZE,2.5
+AMESH,ALL
+NUMCMP,NODE
+ALLSEL,ALL
+
+! ---- 节点号表与坐标/位移数组(帧导出与变形几何导出共用) ----
+*GET,NNOD,NODE,,COUNT
+*DIM,NODNO,ARRAY,NNOD
+*VGET,NODNO(1),NODE,1,NLIST  ! 节点号(紧编号下 = 行号)
+*DIM,XG,ARRAY,NNOD
+*DIM,YG,ARRAY,NNOD
+*DIM,UXA,ARRAY,NNOD
+*DIM,UYA,ARRAY,NNOD
+*DIM,XD,ARRAY,NNOD
+*DIM,YD,ARRAY,NNOD
+
+! ---- 约束:轴上 UX=0,底面 UY=0 ----
+NSEL,S,LOC,X,0
+D,ALL,UX,0
+NSEL,S,LOC,Y,0
+D,ALL,UY,0
+ALLSEL,ALL
+
+NLGEOM,1                     ! 大变形开关(演示通道也开着,行为更贴近真流程)
+
+! ---- 阶段进度侧车:登记表 + 首行 MESH(整文件重写式) ----
+NSTG = NSEG+1                ! 阶段总数 = MESH + NSEG 个求解段
+*DIM,PGLAB,CHAR,NSTG         ! 已完成阶段标签
+*DIM,PGTIM,ARRAY,NSTG        ! 对应累计秒(载荷步分析时间口径)
+PGLAB(1) = 'MESH'
+PGTIM(1) = 0
+*CFOPEN,progress,csv
+JL   = PGLAB(1)
+JTV  = PGTIM(1)
+*VWRITE,JL,JTV
+(A8,',',E16.8)
+*CFCLOSE
+
+/SOLU
+ANTYPE,STATIC
+KBC,0                        ! 段内斜坡加载
+OUTRES,ALL,ALL               ! 供 /POST1 SET,LAST 读回
+
+! ============================================================
+! 分段升压求解循环:每段 = 加载 → SOLVE → 帧导出 → 侧车重写
+! ============================================================
+*DO,I,1,NSEG
+
+  ! ---- 外压:外圆柱面(X=RC)+ 顶/底面,逐段重设到新峰值 ----
+  LSEL,S,LOC,X,RC
+  LSEL,A,LOC,Y,HGT
+  LSEL,A,LOC,Y,0
+  SFL,ALL,PRES,PSEGA(I)
+  ALLSEL,ALL
+
+  TIME,TSEGA(I)              ! 段末时刻(s)
+  NSUBST,5                   ! 段内 5 个子步
+  SOLVE
+
+  ! ---- 帧导出:该段末变形状态(动画数据帧) ----
+  /POST1
+  SET,LAST
+  *VGET,XG(1),NODE,1,LOC,X   ! 节点原始坐标(未 UPGEOM)
+  *VGET,YG(1),NODE,1,LOC,Y
+  *VGET,UXA(1),NODE,1,U,X    ! 节点位移
+  *VGET,UYA(1),NODE,1,U,Y
+  *CFOPEN,frame_%I%,csv      ! %I% 参数代入:frame_1.csv .. frame_4.csv
+  *VWRITE,'node','x_mm','y_mm','ux_mm','uy_mm'
+  (A4,',',A4,',',A4,',',A5,',',A5)
+  *VWRITE,NODNO(1),XG(1),YG(1),UXA(1),UYA(1)
+  (E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8)
+  *CFCLOSE
+
+  ! ---- 侧车重写:登记本段后,全量重写 progress.csv ----
+  PGLAB(I+1) = SEGLAB(I)
+  PGTIM(I+1) = TSEGA(I)
+  *CFOPEN,progress,csv
+  *DO,J,1,I+1
+    JL   = PGLAB(J)
+    JTV  = PGTIM(J)
+    *VWRITE,JL,JTV
+  (A8,',',E16.8)
+  *ENDDO
+  *CFCLOSE
+
+  /SOLU                      ! 回求解器,进入下一段
+*ENDDO
+
+! ============================================================
+! 末段后处理:变形几何数据导出 + 可选结构化结果
+! ============================================================
+/POST1
+SET,LAST
+*VGET,XG(1),NODE,1,LOC,X
+*VGET,YG(1),NODE,1,LOC,Y
+*VGET,UXA(1),NODE,1,U,X
+*VGET,UYA(1),NODE,1,U,Y
+*VOPER,XD(1),XG(1),ADD,UXA(1)   ! 变形后坐标 = 原始 + 位移
+*VOPER,YD(1),YG(1),ADD,UYA(1)
+
+! ---- deform.csv:全节点 初始坐标+位移+变形后坐标 ----
+! 上游 final_powder.step 重构的数据来源(重构本身是上游职责)。
+*CFOPEN,deform,csv
+*VWRITE,'node','x0_mm','y0_mm','ux_mm','uy_mm','xd_mm','yd_mm'
+(A4,',',A5,',',A5,',',A5,',',A5,',',A5,',',A5)
+*VWRITE,NODNO(1),XG(1),YG(1),UXA(1),UYA(1),XD(1),YD(1)
+(E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8)
+*CFCLOSE
+
+! ---- 标量极值 ----
+NSORT,U,X,0,1
+*GET,UXMAX,SORT,,MAX         ! 径向位移最大分量
+NSORT,U,Y,0,1
+*GET,UYMAX,SORT,,MAX         ! 轴向位移最大分量
+! 外壁中点径向位移 → 径向缩放比(正 = 向内收缩)
+NSEL,S,LOC,X,RC-0.1,RC+0.1
+NSEL,R,LOC,Y,HGT/2-0.1,HGT/2+0.1
+*GET,NW,NODE,,NUM,MAX
+UWR  = UX(NW)
+SHRR = -UWR/RC
+ALLSEL,ALL
+PFIN = PSEGA(NSEG)
+
+! ---- results.csv:短标签 + 数值(服务自动解析进 result.values,无需声明) ----
+*CFOPEN,results,csv
+*VWRITE,'ux_max',UXMAX
+(A8,',',E16.8)
+*VWRITE,'uy_max',UYMAX
+(A8,',',E16.8)
+*VWRITE,'shrink_r',SHRR
+(A8,',',E16.8)
+*VWRITE,'p_final',PFIN
+(A8,',',E16.8)
+*CFCLOSE
+
+FINISH

@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 HIP 仿真**计算方法提供方** — 面向 HIPForm 的方法级 ANSYS/MAPDL 计算服务(FastAPI,独立进程部署)。12 个仿真方法共用一个泛化端点 `POST /sim/{method}`,异步作业模式:提交(202)→ 轮询 `GET /jobs/{id}` → 取结果/工件。仓库注释、文档、提交信息全部用中文。
 
+**passthrough 单通道终态**:上游 HIPForm 确认完全跟随本服务 —— `POST /sim/passthrough` 是**唯一**作业提交通道,服务收敛为纯 MAPDL 转发器(忠实执行上游上传的 .inp,结果 `fidelity: "passthrough"`,服务不背书物理内容);原有 12 个类型化方法 API 已整体移除、不再兼容(移除由独立流执行,本文其余章节的 12 方法描述即历史形态)。上游对接契约的唯一入口是 `docs/passthrough-guide.md`(`POST /uploads/apdl` 上传、`declared_outputs` 声明输出、`progress.csv` 阶段侧车、`results.csv` 结构化结果;示范工程在 `docs/examples/passthrough-demo/`)。**安全门槛**:passthrough = 任意 APDL 执行面,开关默认 `false`、仅纯内网允许开启,公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。
+
 ## 常用命令
 
 ```bash

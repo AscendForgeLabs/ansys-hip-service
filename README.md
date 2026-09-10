@@ -5,6 +5,14 @@ HIP 仿真**计算方法提供方** — 面向 HIPForm 的方法级 ANSYS/MAPDL 
 > 定位:HIPForm 需要某项计算(致密化曲线/轴对称/3D 求解/参数标定…)时按需调用单个方法,
 > 不复制上游业务 API(configs/inputs 资产管理不在本服务)。
 
+> **passthrough 单通道终态**:上游确认完全跟随本服务 —— `POST /sim/passthrough` 是
+> **唯一**作业提交通道,服务收敛为纯 MAPDL 转发器:上传 .inp(`POST /uploads/apdl`)→
+> 提交 → 轮询 → 取结果/工件,结果 `fidelity: "passthrough"`(服务不背书物理内容)。
+> 下文"12 个方法"的类型化 API 已整体移除、不再兼容(相关章节为历史形态);
+> 对接以 `docs/passthrough-guide.md` 为准(含示范工程 `docs/examples/passthrough-demo/`)。
+> **安全门槛**:passthrough 是任意 APDL 执行面,开关默认关、仅纯内网允许开启;
+> 公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。
+
 ## 快速开始
 
 ```bash

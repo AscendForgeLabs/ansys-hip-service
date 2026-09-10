@@ -1,0 +1,68 @@
+# passthrough 示范工程:轴对称包套缩放演示
+
+自包含的 passthrough 通道端到端演示(不依赖任何外部几何/网格文件),也是上游
+.inp 编写者的种子模板。完整契约见 `../../passthrough-guide.md`(本文只讲跑通)。
+
+## 文件
+
+| 文件 | 角色 |
+|---|---|
+| `capsule_shrink.inp` | 入口命令流:PLANE183 轴对称;`RECTNG` 自建粉末/包套两区 + `AGLUE` + `AATT`(MAT 1=powder、2=capsule 约定);线弹性占位本构(演示通道,**不背书 HIP 物理**);`NLGEOM,1`;4 段升压载荷步循环;每段写一帧 `frame_N.csv` + 整文件重写 `progress.csv`;末尾写 `deform.csv`(变形几何数据)与 `results.csv`(短标签标量) |
+| `submit_demo.py` | httpx 提交脚本:上传 → 提交 → 轮询打印 status+stages → 流式下载工件;注释里有逐阶段等价 curl |
+| `README.md` | 本文件 |
+
+## 一分钟跑通
+
+前置:部署机已装 v252 与许可,`config/service.yaml` 的 `passthrough.enabled: true`
+(**默认 false,仅纯内网允许开启**;公网隧道期间必须关)。服务在 `:8010`:
+
+```bash
+# 0) 确认开关已开(否则提交得 403 PASSTHROUGH_DISABLED)
+curl -s http://localhost:8010/health
+
+# 1) 跑提交脚本(上传 → 提交 → 轮询 → 下载,全自动)
+pip install httpx
+python submit_demo.py http://localhost:8010
+```
+
+想手动逐步跑(等价 curl 全集在 `submit_demo.py` 顶部注释):
+
+```bash
+curl -s -F 'file=@capsule_shrink.inp' http://localhost:8010/uploads/apdl
+# → {"path": "/var/uploads/xxx_capsule_shrink.inp", "size_bytes": ...}
+
+curl -s -X POST http://localhost:8010/sim/passthrough \
+  -H 'Content-Type: application/json' \
+  -d '{"params": {"entry_file": "/var/uploads/xxx_capsule_shrink.inp",
+        "declared_outputs": ["frame_1.csv","frame_2.csv","frame_3.csv",
+                              "frame_4.csv","deform.csv"],
+        "workflow": "HIP_DEMO_V1", "timeout_s": 1800}}'
+# → 202 {"id": "...", "method": "passthrough", "status_url": "/jobs/..."}
+
+watch -n3 'curl -s http://localhost:8010/jobs/<id>'   # 盯 status 与 stages
+```
+
+## 预期产物
+
+作业 succeeded 后,`demo-artifacts/` 下应得到(脚本自动下载):
+
+| 工件 | 来源 | 用途 |
+|---|---|---|
+| `progress.csv` | 侧车(服务自动发布) | 阶段进度(MESH + 4 个求解段,标签+累计秒) |
+| `frame_1.csv` … `frame_4.csv` | 每载荷段一帧(declared) | 动画数据(Channel C:数据帧 + 前端渲染) |
+| `deform.csv` | 末段后处理(declared) | 全节点 初始坐标+位移+变形后坐标 → 上游 final_powder.step 重构数据源 |
+| `results.csv` | 末段后处理(自动) | 短标签标量,服务解析进 result 的 `values`(ux_max / uy_max / shrink_r / p_final) |
+| `capsule_shrink.inp` | 入口回声(自动) | 溯源 |
+| `job.out` | MAPDL 输出(无条件) | 错误分析 |
+
+量级参考(线弹性占位本构,仅验证通道):`shrink_r` ≈ 2% 量级的径向收缩。
+
+## 改模板时注意
+
+- **改段数 NSEG**:提交侧 `declared_outputs` 的帧文件名必须同步
+  (`*CFOPEN,frame_%I%,csv` 生成 `frame_1.csv .. frame_<NSEG>.csv`);
+- 每个 `*VWRITE` 字符字面量标签 ≤8 字符(超长被 MAPDL 静默截断,写读两侧撞键);
+- `progress.csv` / `results.csv` / 入口 .inp / `job.out` 由服务自动处理,
+  **不要**放进 `declared_outputs`;
+- 有附属 .cdb 时:逐个 `POST /uploads/apdl` 上传,路径填 `extra_files`,
+  .inp 内裸文件名 `CDREAD` 引用。
