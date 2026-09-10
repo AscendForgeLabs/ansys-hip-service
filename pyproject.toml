@@ -1,20 +1,15 @@
 [project]
 name = "ansys-hip-service"
 version = "0.1.0"
-description = "HIP 仿真计算方法提供方 — 面向 HIPForm 的方法级 ANSYS/MAPDL 计算服务"
+description = "HIP 仿真纯 MAPDL 转发器 — 面向 HIPForm 的 passthrough 直通计算运输服务"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
-  "python-multipart>=0.0.9",
+    "python-multipart>=0.0.9",
     "pyyaml>=6.0",
-    "numpy>=1.26",
-    "scipy>=1.13",
-    "meshio>=5.3",
-    "trimesh>=4.4",
-    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]

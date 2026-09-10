@@ -1,61 +1,49 @@
 # ansys-hip-service
 
-HIP 仿真**计算方法提供方** — 面向 HIPForm 的方法级 ANSYS/MAPDL 计算服务(独立进程/独立机器部署)。
+HIP 仿真**纯 MAPDL 转发器** — 面向 HIPForm 的 ANSYS/MAPDL 计算运输服务(独立进程/独立机器部署)。
 
-> 定位:HIPForm 需要某项计算(致密化曲线/轴对称/3D 求解/参数标定…)时按需调用单个方法,
-> 不复制上游业务 API(configs/inputs 资产管理不在本服务)。
-
-> **passthrough 单通道终态**:上游确认完全跟随本服务 —— `POST /sim/passthrough` 是
-> **唯一**作业提交通道,服务收敛为纯 MAPDL 转发器:上传 .inp(`POST /uploads/apdl`)→
-> 提交 → 轮询 → 取结果/工件,结果 `fidelity: "passthrough"`(服务不背书物理内容)。
-> 下文"12 个方法"的类型化 API 已整体移除、不再兼容(相关章节为历史形态);
-> 对接以 `docs/passthrough-guide.md` 为准(含示范工程 `docs/examples/passthrough-demo/`)。
-> **安全门槛**:passthrough 是任意 APDL 执行面,开关默认关、仅纯内网允许开启;
-> 公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。
+> **passthrough 单通道**:`POST /sim/passthrough` 是**唯一**作业提交通道。
+> 上游自带 APDL 输入(.inp 及附属 .cdb 等),本服务只负责忠实执行与运输:
+> 上传(`POST /uploads/apdl`)→ 提交(202)→ 轮询 `GET /jobs/{id}`(含 stages 阶段进度)
+> → 取结果/工件;结果 `fidelity: "passthrough"`,服务不背书物理内容。
+> 原有 12 个类型化方法 API 已整体移除、不再兼容(上游确认完全跟随本服务)。
+> **安全门槛**:passthrough 是任意 APDL 执行面(可读写文件、起系统命令),开关默认关、
+> 仅纯内网允许开启;公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。
 
 ## 快速开始
 
 ```bash
-uv sync
+uv sync --extra dev
 uv run uvicorn ansys_hip.main:app --host 0.0.0.0 --port 8010
-# Swagger 详细文档: http://<host>:8010/docs   (简要文档: docs/api-brief.md)
+# Swagger 详细文档: http://<host>:8010/docs
+# 开启 passthrough: config/service.yaml 的 passthrough.enabled,
+#                  或环境变量 HIP_SERVICE_PASSTHROUGH_ENABLED=true
 ```
 
-## 调用模式
+## 对接
 
-提交作业:12 个方法各有**类型化端点** `POST /sim/{name}`(由 REGISTRY 循环生成,Swagger
-提供字段级表单与校验提示);泛化 `POST /sim/{method}` 保留兜底(仅未知方法可达,
-已知方法的既有调用由类型化端点等价服务 — HIPForm 零改动,不在 Swagger 展示)。
-两套入口共用同一条合并/校验/入队管线,结果一致。
-异步模式:202 受理 → 轮询 `GET /jobs/{id}` → 取结果/工件。
+- 唯一入口:`docs/passthrough-guide.md` — HTTP 交付全流程、.inp 编写指南(declared_outputs
+  声明 / progress.csv 阶段侧车 / results.csv 结构化结果)、错误码表、上游工作流映射。
+- 示范工程:`docs/examples/passthrough-demo/` — 自包含轴对称包套缩放 .inp + 提交脚本,
+  可直接用作通道冒烟。
 
-## 方法一览(12 个,阶段 1 全部上线)
+## 配置
 
-| 分组 | 方法 | 内核(阶段 1) |
-|---|---|---|
-| 快速计算 | densification / process-window / shrinkage-estimate / material-query / mesh | 真实(Arrhenius·scipy·gmsh) |
-| 2D FEM | axisym-hip* / axisym-thermal / axisym-mechanical* | thermal 真实;*冒烟(阶段 2 换本构,API 不变) |
-| 3D FEM | full3d-hip* | 冒烟(真实网格+占位本构) |
-| 反演/优化 | calibrate / compensate / sensitivity | 真实(scipy·缩放) |
+`config/service.yaml`(可被环境变量覆盖:`HIP_SERVICE_CONFIG` / `ANSYS_BIN` /
+`ANSYSLMD_LICENSE_FILE` / `HIP_SERVICE_PASSTHROUGH_ENABLED`):
 
-冒烟方法在 `GET /sim/methods` 标 `status: experimental`,结果 JSON 带 `fidelity: "smoke"`。
-
-## 配置体系(三级覆盖)
-
-```
-请求内联 params > config/parts/<零件>.yaml > config/service.yaml (defaults)
-```
-
-- `config/service.yaml` — 网关级主配置:端口/ANSYS 路径/许可/并发/jobs 目录/默认工艺曲线(900℃/120MPa/3h)
-- `config/parts/*.yaml` — 零件配置:几何路径/材料选定/曲线与网格覆盖
+- ANSYS v252 批处理路径与许可文件;
+- 队列并发(单许可 → 1)、作业超时(4h,用户 `timeout_s` 取 min);
+- 存储目录(jobs/uploads)与保留期;
+- `passthrough.enabled` 开关(默认 false)。
 
 ## 环境
 
-- ANSYS 2022 R1 (`ansys221` 批处理;单许可 → 队列并发 1)
-- Python 3.12 / FastAPI / pydantic v2 / numpy / scipy / gmsh / meshio
+- ANSYS 2025 R2(`ansys252 -b -i` 批处理;单许可 → 队列并发 1)
+- Python 3.12 / FastAPI / pydantic v2 / uvicorn
 
-## 文档
+## 测试
 
-- `docs/api-brief.md` — 简要 API 文档(快速开始/错误码/curl 示例)
-- `docs/materials-process.md` — 材料/工艺规格(TC4 粉末 + 20 钢包套 + 900℃/120MPa/3h)
-- `/docs`(Swagger)/`/redoc` — 全端点详细文档(字段级 description/examples)
+```bash
+.venv/bin/python -m pytest -q   # 假执行器,不跑真 MAPDL;真求解在部署机手工 e2e
+```
