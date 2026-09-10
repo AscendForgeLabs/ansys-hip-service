@@ -17,10 +17,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ansys_hip import registry
-from ansys_hip.settings import Settings
+from ansys_hip.api import _resolve_params, create_app
+from ansys_hip.settings import Settings, load_parts
 
 # 复用 test_api_core 的测试工具(pytest 会把 tests/ 加入 sys.path)
-from test_api_core import submit, wait_for_terminal
+from test_api_core import (
+    HOT_SHORT_PART,
+    read_resolved_params,
+    submit,
+    wait_for_terminal,
+    write_part_config,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -230,3 +237,215 @@ def test_real_compensate_end_to_end_in_worker_thread(
     download = client.get(f"/jobs/{accepted['id']}/artifacts/{artifact_name}")
     assert download.status_code == 200
     assert b"MANIFOLD_SOLID_BREP" in download.content[:4000]
+
+
+# ---------------------------------------------------------------------------
+# 类型化提交路由(REGISTRY 生成 × 12)— openapi 形态 / 管线等价 / 合并语义
+# ---------------------------------------------------------------------------
+
+TYPED_METHODS = sorted(registry.REGISTRY)
+
+
+def _wrapper_model_name(method: str) -> str:
+    """独立复算包装模型名(api._camel_case 的镜像,防实现与断言同源)。"""
+    return "".join(part.capitalize() for part in method.split("-")) + "SimRequest"
+
+
+@pytest.mark.parametrize("name", TYPED_METHODS)
+def test_typed_route_present_in_openapi(client: TestClient, name: str) -> None:
+    """每个方法一个 POST /sim/{name}:引用正确的包装/参数模型,带真实示例与分组标签。"""
+    spec = client.app.openapi()
+    operation = spec["paths"][f"/sim/{name}"]["post"]
+
+    wrapper_name = _wrapper_model_name(name)
+    schema_ref = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+    assert schema_ref == f"#/components/schemas/{wrapper_name}"
+
+    params_model_name = registry.REGISTRY[name].params_model.__name__
+    wrapper = spec["components"]["schemas"][wrapper_name]
+    params_ref = wrapper["properties"]["params"]["anyOf"][0]["$ref"]
+    assert params_ref == f"#/components/schemas/{params_model_name}"
+
+    # 参数模型的字段级 description 真的进了 schema(Swagger 表单提示,R1)
+    params_schema = spec["components"]["schemas"][params_model_name]
+    described = [
+        key for key, prop in params_schema.get("properties", {}).items()
+        if "description" in prop
+    ]
+    assert described, f"{params_model_name} 字段缺少 description"
+
+    examples = operation["requestBody"]["content"]["application/json"].get("examples")
+    assert examples, f"{name} 缺请求示例"
+
+    group = registry.REGISTRY[name].group
+    assert operation["tags"] == [registry.GROUP_LABELS[group]]
+    assert operation["summary"] == registry.REGISTRY[name].summary
+
+
+def test_generic_submit_route_hidden_from_openapi(client: TestClient) -> None:
+    """泛化 POST /sim/{method} 运行时保留(HIPForm 兼容)但不出现在 Swagger。"""
+    spec = client.app.openapi()
+    assert "/sim/{method}" not in spec["paths"]
+    sim_posts = sorted(
+        path for path, item in spec["paths"].items()
+        if path.startswith("/sim/") and "post" in item
+    )
+    assert sim_posts == [f"/sim/{name}" for name in TYPED_METHODS]
+
+
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    [
+        ("densification", {"part": "tc4-demo", "params": {"initial_relative_density": 0.68}}),
+        ("material-query", {"params": {"material": "20steel", "temperatures_c": [20, 900]}}),
+    ],
+)
+def test_typed_route_matches_generic_pipeline(
+    client: TestClient,
+    fake_executors,
+    settings: Settings,
+    name: str,
+    payload: dict[str, Any],
+) -> None:
+    """类型化路由(exclude_unset dump)与泛化管线语义(手拼 dict → _resolve_params)
+    对同一 (part, 内联参数) 产出完全一致的合并结果。"""
+    calls: list[Any] = []
+
+    def capture(params: Any, ctx: Any) -> dict[str, Any]:
+        calls.append(params)
+        return {"fidelity": "real"}
+
+    fake_executors[name] = capture
+    accepted = submit(client, name, payload)
+    state = wait_for_terminal(client, accepted["id"])
+    assert state["status"] == "succeeded", state
+
+    part = payload.get("part")
+    part_config = load_parts(settings.parts_dir).get(part) if part else None
+    expected = _resolve_params(
+        registry.REGISTRY[name], settings, part_config, payload["params"]
+    )
+    assert calls and calls[0] == expected
+    assert read_resolved_params(settings, accepted["id"]) == expected.model_dump(mode="json")
+
+
+def test_typed_route_unset_fields_inherit_part_config(
+    settings_factory, fake_executors, tmp_path: Path
+) -> None:
+    """exclude_unset 语义(方案 §4.3):只给 nlgeom,零件的 mesh 4.0 / cycle /
+    numerics 不被模型默认值(mesh_size_mm=6.0)压掉 — 防默认值覆盖配置回归。"""
+    parts_dir = tmp_path / "parts-typed"
+    write_part_config(parts_dir, "hot-short", HOT_SHORT_PART)
+    fake_executors["axisym-hip"] = lambda params, ctx: {"fidelity": "smoke"}
+    settings = settings_factory(parts_dir=parts_dir)
+
+    with TestClient(create_app(settings)) as client:
+        accepted = submit(
+            client, "axisym-hip", {"part": "hot-short", "params": {"nlgeom": True}}
+        )
+        resolved = read_resolved_params(settings, accepted["id"])
+
+    assert resolved["mesh"]["mesh_size_mm"] == 4.0
+    assert resolved["numerics"]["time_step_s"] == 60
+    assert [p["time_s"] for p in resolved["cycle"]["points"]] == [0, 7200]
+    assert resolved["materials"]["powder"] == "tc4"
+    assert resolved["nlgeom"] is True
+
+
+def test_typed_route_nested_unset_keeps_sibling_from_part(
+    settings_factory, fake_executors, tmp_path: Path
+) -> None:
+    """嵌套 exclude_unset:内联只给 geometry.capsule_step,不以 cavity_step=None
+    顶掉零件配置的型腔路径(手拼 dict 做不到的增强)。"""
+    part_config = {
+        **HOT_SHORT_PART,
+        "geometry": {
+            "capsule_step": "/tmp/hot/capsule.step",
+            "cavity_step": "/tmp/hot/cavity.step",
+        },
+    }
+    parts_dir = tmp_path / "parts-nested"
+    write_part_config(parts_dir, "hot-short", part_config)
+    fake_executors["mesh"] = lambda params, ctx: {"fidelity": "real"}
+    settings = settings_factory(parts_dir=parts_dir)
+
+    with TestClient(create_app(settings)) as client:
+        accepted = submit(
+            client,
+            "mesh",
+            {"part": "hot-short", "params": {"geometry": {"capsule_step": "/tmp/hot/c2.step"}}},
+        )
+        resolved = read_resolved_params(settings, accepted["id"])
+
+    assert resolved["geometry"]["capsule_step"] == "/tmp/hot/c2.step"   # 显式内联
+    assert resolved["geometry"]["cavity_step"] == "/tmp/hot/cavity.step"  # 零件配置保留
+
+
+def test_typed_route_full3d_part_only_submit(
+    settings_factory, fake_executors, tmp_path: Path
+) -> None:
+    """params 可省略(方案 §4.2 修正点:可选而非必填):full3d-hip 的必填
+    geometry 由零件配置补齐后通过校验,零件全继承提交形态可用。"""
+    parts_dir = tmp_path / "parts-f3d"
+    write_part_config(parts_dir, "hot-short", HOT_SHORT_PART)
+    fake_executors["full3d-hip"] = lambda params, ctx: {"fidelity": "smoke"}
+    settings = settings_factory(parts_dir=parts_dir)
+
+    with TestClient(create_app(settings)) as client:
+        accepted = submit(client, "full3d-hip", {"part": "hot-short"})
+        resolved = read_resolved_params(settings, accepted["id"])
+
+    assert resolved["geometry"]["capsule_step"] == "/tmp/hot/capsule.step"
+
+
+def test_typed_route_unknown_field_rejected(client: TestClient) -> None:
+    """类型化路由传拼错字段 → pydantic extra=forbid → 400 INVALID_PARAMS
+    (与泛化路由的手工 unknown-key 检查同码,不被静默吞掉)。"""
+    response = client.post(
+        "/sim/densification",
+        json={"params": {"initial_relative_dens": 0.68}},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "INVALID_PARAMS"
+    assert "initial_relative_dens" in body["message"]
+
+
+def test_typed_route_unknown_part_returns_404(
+    client: TestClient, fake_executors
+) -> None:
+    fake_executors["densification"] = lambda params, ctx: {"fidelity": "real"}
+    response = client.post("/sim/densification", json={"part": "no-such-part"})
+    assert response.status_code == 404
+    assert response.json()["code"] == "PART_NOT_FOUND"
+
+
+def test_typed_route_disabled_method_returns_503(
+    settings_factory, fake_executors
+) -> None:
+    """下线检查先于参数校验(§6.3 顺序):空请求体也直接 503。"""
+    fake_executors["mesh"] = lambda params, ctx: {"fidelity": "real"}
+    settings = settings_factory(disabled=("mesh",))
+    with TestClient(create_app(settings)) as client:
+        response = client.post("/sim/mesh", json={})
+    assert response.status_code == 503
+    assert response.json()["code"] == "METHOD_DISABLED"
+
+
+def test_typed_route_unimplemented_kernel_returns_501(
+    client: TestClient, fake_executors
+) -> None:
+    """fake_executors 未注册的方法 → resolve_executor 为 None → 501。"""
+    response = client.post(
+        "/sim/axisym-hip",
+        json={"params": {"profile": {"outer_radius_mm": 50, "height_mm": 150}}},
+    )
+    assert response.status_code == 501
+    assert response.json()["code"] == "METHOD_NOT_IMPLEMENTED"
+
+
+def test_fallback_route_unknown_method_returns_404(client: TestClient) -> None:
+    """未知方法名落泛化兜底路由 → 404 METHOD_NOT_FOUND(类型化路由只截获已知方法)。"""
+    response = client.post("/sim/no-such-method", json={})
+    assert response.status_code == 404
+    assert response.json()["code"] == "METHOD_NOT_FOUND"

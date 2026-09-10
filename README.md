@@ -13,6 +13,13 @@ uv run uvicorn ansys_hip.main:app --host 0.0.0.0 --port 8010
 # Swagger 详细文档: http://<host>:8010/docs   (简要文档: docs/api-brief.md)
 ```
 
+## 调用模式
+
+提交作业:12 个方法各有**类型化端点** `POST /sim/{name}`(由 REGISTRY 循环生成,Swagger
+提供字段级表单与校验提示);泛化 `POST /sim/{method}` 仍运行时兼容(HIPForm 零改动,
+不在 Swagger 展示)。两套入口共用同一条合并/校验/入队管线,结果一致。
+异步模式:202 受理 → 轮询 `GET /jobs/{id}` → 取结果/工件。
+
 ## 方法一览(12 个,阶段 1 全部上线)
 
 | 分组 | 方法 | 内核(阶段 1) |

@@ -115,7 +115,19 @@ class ErrorBody(BaseModel):
 # 各方法参数模型(方法注册表引用;字段即 Swagger 输入)
 # ---------------------------------------------------------------------------
 
-class DensificationParams(BaseModel):
+class MethodParamsBase(BaseModel):
+    """方法参数模型共享基类:未知顶层键一律拒绝(400 INVALID_PARAMS)。
+
+    与泛化路由的手工 unknown-key 检查双保险;类型化路由(POST /sim/{name})
+    靠它让 pydantic 直接挡掉拼错的字段名,不被静默吞掉。
+    仅方法顶层参数模型继承 — 嵌套构件(Cycle/GeometryRef 等)保持默认,
+    两套入口行为完全一致。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class DensificationParams(MethodParamsBase):
     """致密化曲线参数(方法 densification)。"""
 
     initial_relative_density: float = Field(default=0.65, gt=0, lt=1, description="初始相对密度", examples=[0.65])
@@ -129,7 +141,7 @@ class DensificationParams(BaseModel):
     )
 
 
-class ProcessWindowParams(BaseModel):
+class ProcessWindowParams(MethodParamsBase):
     """工艺窗口扫参(方法 process-window):温度×压力×保温时长 → 终态密度。"""
 
     base: DensificationParams = Field(default_factory=DensificationParams, description="基准参数")
@@ -138,7 +150,7 @@ class ProcessWindowParams(BaseModel):
     hold_times_s: list[float] = Field(default=[7200, 10800, 14400], description="保温时长扫参点(秒)")
 
 
-class ShrinkageEstimateParams(BaseModel):
+class ShrinkageEstimateParams(MethodParamsBase):
     """均匀收缩估算(方法 shrinkage-estimate)。"""
 
     initial_relative_density: float = Field(default=0.65, gt=0, lt=1, description="初始相对密度")
@@ -151,7 +163,7 @@ class ShrinkageEstimateParams(BaseModel):
     )
 
 
-class MaterialQueryParams(BaseModel):
+class MaterialQueryParams(MethodParamsBase):
     """材料性能查询(方法 material-query)。"""
 
     material: str = Field(default="tc4", description="材料名:tc4 | 20steel", examples=["tc4"])
@@ -162,7 +174,7 @@ class MaterialQueryParams(BaseModel):
     )
 
 
-class MeshMethodParams(BaseModel):
+class MeshMethodParams(MethodParamsBase):
     """网格转换(方法 mesh):STEP → 粉末域 → Gmsh → .cdb。"""
 
     geometry: GeometryRef = Field(..., description="几何引用(capsule_step 必填)")
@@ -179,7 +191,7 @@ class AxisymProfile(BaseModel):
     height_mm: float | None = Field(default=None, gt=0, description="轴向高度(mm)", examples=[150])
 
 
-class AxisymHipParams(BaseModel):
+class AxisymHipParams(MethodParamsBase):
     """2D 轴对称 HIP 全过程(方法 axisym-hip;阶段 1 冒烟=线性占位本构)。"""
 
     geometry: GeometryRef | None = Field(default=None, description="几何(用于自动剖面);None 需给 profile")
@@ -191,7 +203,7 @@ class AxisymHipParams(BaseModel):
     nlgeom: bool = Field(default=False, description="大变形开关(冒烟阶段建议 False)")
 
 
-class AxisymThermalParams(BaseModel):
+class AxisymThermalParams(MethodParamsBase):
     """升温段温度场(方法 axisym-thermal;真实内核:纯热瞬态)。"""
 
     geometry: GeometryRef | None = Field(default=None, description="几何(用于自动剖面);None 需给 profile")
@@ -206,7 +218,7 @@ class AxisymThermalParams(BaseModel):
     )
 
 
-class AxisymMechanicalParams(BaseModel):
+class AxisymMechanicalParams(MethodParamsBase):
     """保温段应力/密度分布(方法 axisym-mechanical;阶段 1 冒烟=线弹性)。"""
 
     geometry: GeometryRef | None = Field(default=None, description="几何(用于自动剖面);None 需给 profile")
@@ -217,7 +229,7 @@ class AxisymMechanicalParams(BaseModel):
     mesh: MeshSettings = Field(default_factory=MeshSettings)
 
 
-class Full3dHipParams(BaseModel):
+class Full3dHipParams(MethodParamsBase):
     """3D 全模型 HIP(方法 full3d-hip;阶段 1 冒烟=真实网格+线性占位本构)。"""
 
     geometry: GeometryRef = Field(..., description="capsule_step 必填")
@@ -234,7 +246,7 @@ class ExperimentalPoint(BaseModel):
     relative_density: float = Field(..., gt=0, le=1, description="相对密度(0-1)")
 
 
-class CalibrateParams(BaseModel):
+class CalibrateParams(MethodParamsBase):
     """本构参数标定(方法 calibrate;阶段 1=Arrhenius 最小二乘)。"""
 
     experimental: list[ExperimentalPoint] = Field(..., min_length=3, description="实验 D-t 数据(≥3 点)")
@@ -247,7 +259,7 @@ class CalibrateParams(BaseModel):
     )
 
 
-class CompensateParams(BaseModel):
+class CompensateParams(MethodParamsBase):
     """型腔预变形补偿(方法 compensate;阶段 1=均匀收缩缩放)。"""
 
     geometry: GeometryRef = Field(..., description="cavity_step=目标型腔(必填)")
@@ -256,7 +268,7 @@ class CompensateParams(BaseModel):
     scale_axis: Literal["uniform", "per_axis"] = Field(default="uniform", description="均匀/各向异性缩放")
 
 
-class SensitivityParams(BaseModel):
+class SensitivityParams(MethodParamsBase):
     """参数敏感性(方法 sensitivity;阶段 1=快速核批量)。"""
 
     base: DensificationParams = Field(default_factory=DensificationParams, description="基准参数")

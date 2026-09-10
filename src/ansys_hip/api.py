@@ -16,7 +16,7 @@ import re
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import (
     APIRouter,
@@ -31,7 +31,7 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError, create_model
 
 from . import __version__, registry
 from .queue import ACTIVE_STATUSES, ARTIFACTS_DIRNAME, JobQueue, LOG_FILENAME, RESULT_FILENAME
@@ -112,7 +112,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.queue = queue
     app.include_router(_health_router(resolved_settings, queue))
-    app.include_router(_sim_router(resolved_settings, parts, queue), prefix="/sim", tags=["sim"])
+    # sim 路由不统一打 tags:12 个类型化端点各按方法组(注册表 GROUP_LABELS)折叠展示
+    app.include_router(_sim_router(resolved_settings, parts, queue), prefix="/sim")
     app.include_router(_jobs_router(queue), prefix="/jobs", tags=["jobs"])
     app.include_router(_parts_router(parts), prefix="/parts", tags=["parts"])
     app.include_router(_uploads_router(resolved_settings), prefix="/uploads", tags=["uploads"])
@@ -172,6 +173,203 @@ def _is_license_spec(spec: str) -> bool:
 # sim:方法自描述 + 作业提交
 # ---------------------------------------------------------------------------
 
+_SUBMIT_RESPONSES: dict[int, dict[str, Any]] = {
+    400: {"model": ErrorBody, "description": "参数校验失败(INVALID_PARAMS)"},
+    404: {"model": ErrorBody, "description": "零件不存在(PART_NOT_FOUND)"},
+    501: {"model": ErrorBody, "description": "内核尚未实现(METHOD_NOT_IMPLEMENTED)"},
+    503: {"model": ErrorBody, "description": "方法已临时下线(METHOD_DISABLED)"},
+}
+
+# 各类型化端点的 Swagger 请求示例(值一律取自真实 e2e/测试用例,不编造)
+_TYPED_ROUTE_EXAMPLES: dict[str, dict[str, dict[str, Any]]] = {
+    "densification": {
+        "零件配置全继承": {
+            "summary": "tc4-demo(几何/材料/曲线继承零件配置)",
+            "value": {"part": "tc4-demo"},
+        },
+        "零件配置+内联覆盖": {
+            "summary": "在零件配置基础上覆盖初始相对密度",
+            "value": {
+                "part": "tc4-demo",
+                "params": {"initial_relative_density": 0.68},
+            },
+        },
+        "纯内联参数": {
+            "summary": "不带零件,直接给参数与曲线",
+            "value": {
+                "params": {
+                    "initial_relative_density": 0.62,
+                    "cycle": {
+                        "points": [
+                            {"time_s": 0, "temperature_c": 20, "pressure_mpa": 0},
+                            {"time_s": 3600, "temperature_c": 900, "pressure_mpa": 120},
+                            {"time_s": 10800, "temperature_c": 900, "pressure_mpa": 120},
+                        ]
+                    },
+                }
+            },
+        },
+    },
+    "material-query": {
+        "查询 20 钢": {
+            "summary": "指定材料与温度点(e2e 用例)",
+            "value": {"params": {"material": "20steel", "temperatures_c": [20, 900]}},
+        },
+    },
+    "mesh": {
+        "双 STEP 网格": {
+            "summary": "包套+型腔 STEP → cdb/stl(test_mesh 用例)",
+            "value": {
+                "params": {
+                    "geometry": {
+                        "capsule_step": "/home/yushen/tempt/capsule.step",
+                        "cavity_step": "/home/yushen/tempt/cavity.step",
+                    },
+                    "output_formats": ["cdb", "stl"],
+                }
+            },
+        },
+    },
+    "process-window": {
+        "温度×压力×时长扫参": {
+            "summary": "4×5×3 网格扫参(api-brief §7.3 用例)",
+            "value": {
+                "params": {
+                    "temperatures_c": [880, 900, 920, 940],
+                    "pressures_mpa": [100, 110, 120, 130, 140],
+                    "hold_times_s": [7200, 10800, 14400],
+                }
+            },
+        },
+    },
+    "shrinkage-estimate": {
+        "特征尺寸收缩": {
+            "summary": "0.65→0.97,按命名特征尺寸(test_kernels 用例)",
+            "value": {
+                "params": {
+                    "initial_relative_density": 0.65,
+                    "final_relative_density": 0.97,
+                    "characteristic_lengths_mm": {"height": 150.0, "outer_diameter": 100.0},
+                }
+            },
+        },
+    },
+    "axisym-hip": {
+        "显式 2D 剖面": {
+            "summary": "零件配置 + 内联剖面与 nlgeom(api-brief §7.2 用例)",
+            "value": {
+                "part": "tc4-demo",
+                "params": {
+                    "profile": {"outer_radius_mm": 50, "height_mm": 150},
+                    "nlgeom": False,
+                },
+            },
+        },
+    },
+    "axisym-thermal": {
+        "升温段热瞬态": {
+            "summary": "剖面几何,探针用缺省(芯部+底面)",
+            "value": {"params": {"profile": {"outer_radius_mm": 50.0, "height_mm": 150.0}}},
+        },
+    },
+    "axisym-mechanical": {
+        "保温段力学": {
+            "summary": "显式剖面(test_mesh 剖面用例)",
+            "value": {
+                "params": {
+                    "profile": {
+                        "inner_radius_mm": 20.0,
+                        "outer_radius_mm": 30.0,
+                        "height_mm": 60.0,
+                    }
+                }
+            },
+        },
+    },
+    "full3d-hip": {
+        "零件全继承": {
+            "summary": "必填 geometry 由零件配置提供",
+            "value": {"part": "tc4-demo"},
+        },
+    },
+    "calibrate": {
+        "实验 D-t 拟合": {
+            "summary": "3 点实验数据(test_api 用例)",
+            "value": {
+                "params": {
+                    "experimental": [
+                        {"time_s": 0, "relative_density": 0.65},
+                        {"time_s": 5400, "relative_density": 0.90},
+                        {"time_s": 14400, "relative_density": 0.99},
+                    ]
+                }
+            },
+        },
+    },
+    "compensate": {
+        "型腔补偿": {
+            "summary": "目标型腔 STEP,均匀收缩(test_kernels 用例)",
+            "value": {
+                "params": {
+                    "geometry": {"cavity_step": "/home/yushen/tempt/cavity.step"},
+                    "initial_relative_density": 0.65,
+                    "final_relative_density": 0.97,
+                }
+            },
+        },
+    },
+    "sensitivity": {
+        "参数扫敏感度": {
+            "summary": "温度/保温时长扫参(test_kernels 用例)",
+            "value": {
+                "params": {
+                    "base": {"initial_relative_density": 0.65},
+                    "sweep": {
+                        "temperature_c": [860, 900, 940],
+                        "hold_time_s": [7200, 10800, 14400],
+                    },
+                }
+            },
+        },
+    },
+}
+
+
+def _camel_case(method_name: str) -> str:
+    """方法名 → 包装模型驼峰前缀:full3d-hip → Full3dHip。"""
+    return "".join(part.capitalize() for part in method_name.split("-"))
+
+
+def _typed_route_description(spec: registry.MethodSpec) -> str:
+    """类型化端点 description:返回形态/耗时/保真度/标签均取自 REGISTRY(单一事实来源)。"""
+    smoke_note = (
+        "(冒烟:真实几何+占位本构,量级不可用于工程判定)"
+        if spec.fidelity == "smoke"
+        else ""
+    )
+    lines = [
+        spec.summary,
+        "",
+        f"- 返回:`{spec.returns}`",
+        f"- 典型耗时:{spec.typical_runtime}",
+        f"- 保真度:`{spec.fidelity}`{smoke_note}",
+        f"- 标签:{'、'.join(spec.tags) if spec.tags else '—'}",
+        "",
+        "合并优先级 params > part 配置 > 主配置 defaults;"
+        "与 `POST /sim/{method}`(泛化兜底,运行时等价)共用同一条提交管线。",
+    ]
+    return "\n".join(lines)
+
+
+def _examples_openapi_extra(
+    examples: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """把命名示例包成 openapi_extra 的 requestBody 结构(无示例 → None)。"""
+    if not examples:
+        return None
+    return {"requestBody": {"content": {"application/json": {"examples": examples}}}}
+
+
 def _sim_router(
     settings: Settings,
     parts: dict[str, dict[str, Any]],
@@ -183,60 +381,53 @@ def _sim_router(
         "/methods",
         response_model=list[dict[str, Any]],
         summary="方法自描述清单(12 个)",
+        tags=["sim"],
     )
     def list_methods() -> list[dict[str, Any]]:
         """按组排序的全部方法元数据,含各方法参数模型的 JSON Schema。"""
         return registry.methods_payload()
 
+    # 12 个类型化路由(先注册,先匹配):请求体 = <Method>SimRequest{part, params},
+    # params 即该方法的参数模型 → Swagger 字段级表单 + pydantic 提前校验(含 extra=forbid)。
+    for spec in registry.REGISTRY.values():
+        request_model = create_model(
+            f"{_camel_case(spec.name)}SimRequest",
+            part=(str | None, Field(
+                default=None,
+                description="零件配置名(config/parts/<name>.yaml);与 params 可只给其一",
+                examples=["tc4-demo"],
+            )),
+            params=(spec.params_model | None, Field(
+                default=None,
+                description=f"{spec.summary};未给的字段沿配置链继承(不覆盖零件配置)",
+            )),
+        )
+        router.post(
+            f"/{spec.name}",
+            response_model=SimAccepted,
+            status_code=status.HTTP_202_ACCEPTED,
+            summary=spec.summary,
+            description=_typed_route_description(spec),
+            tags=[registry.GROUP_LABELS[spec.group]],
+            responses=_SUBMIT_RESPONSES,
+            openapi_extra=_examples_openapi_extra(_TYPED_ROUTE_EXAMPLES.get(spec.name)),
+        )(_typed_submit_endpoint(spec, request_model, settings, parts, queue))
+
+    # 泛化兜底(后注册):已知方法已被上面的类型化路由截获,这里只服务未知方法
+    #(404)与 HIPForm 的既有调用形态;运行时行为不变,但不再进 OpenAPI/Swagger。
     @router.post(
         "/{method}",
         response_model=SimAccepted,
         status_code=status.HTTP_202_ACCEPTED,
-        summary="提交仿真作业",
-        responses={
-            400: {"model": ErrorBody, "description": "参数校验失败(INVALID_PARAMS)"},
-            404: {"model": ErrorBody, "description": "方法或零件不存在"},
-            501: {"model": ErrorBody, "description": "内核尚未实现(METHOD_NOT_IMPLEMENTED)"},
-            503: {"model": ErrorBody, "description": "方法已临时下线(METHOD_DISABLED)"},
-        },
-        openapi_extra={
-            "requestBody": {
-                "content": {
-                    "application/json": {
-                        "examples": {
-                            "零件配置全继承": {
-                                "summary": "tc4-demo(几何/材料/曲线继承零件配置)",
-                                "value": {"part": "tc4-demo"},
-                            },
-                            "零件配置+内联覆盖": {
-                                "summary": "在零件配置基础上覆盖初始相对密度",
-                                "value": {
-                                    "part": "tc4-demo",
-                                    "params": {"initial_relative_density": 0.68},
-                                },
-                            },
-                            "纯内联参数": {
-                                "summary": "不带零件,直接给参数与曲线",
-                                "value": {
-                                    "params": {
-                                        "initial_relative_density": 0.62,
-                                        "cycle": {
-                                            "points": [
-                                                {"time_s": 0, "temperature_c": 20, "pressure_mpa": 0},
-                                                {"time_s": 3600, "temperature_c": 900, "pressure_mpa": 120},
-                                                {"time_s": 10800, "temperature_c": 900, "pressure_mpa": 120},
-                                            ]
-                                        },
-                                    }
-                                },
-                            },
-                        }
-                    }
-                }
-            }
-        },
+        summary="提交仿真作业(泛化兜底,不在 Swagger 展示)",
+        tags=["sim"],
+        include_in_schema=False,
+        responses=_SUBMIT_RESPONSES,
     )
-    def submit_simulation(method: str, request: SimRequest) -> SimAccepted:
+    def submit_simulation(
+        method: str = PathParam(description="方法名(可用方法见 GET /sim/methods)"),
+        request: SimRequest = ...,
+    ) -> SimAccepted:
         """提交作业并入队;合并优先级 params > part 配置 > 主配置 defaults。"""
         spec = registry.get_method(method)
         if spec is None:
@@ -244,33 +435,79 @@ def _sim_router(
                 404, "METHOD_NOT_FOUND",
                 f"未知方法 '{method}';可用方法见 GET /sim/methods",
             )
-        if method in settings.methods.disabled:
-            raise ApiError(
-                503, "METHOD_DISABLED",
-                f"方法 '{method}' 已被临时下线(config/service.yaml methods.disabled)",
-            )
-        executor = registry.resolve_executor(method)
-        if executor is None:
-            raise ApiError(501, "METHOD_NOT_IMPLEMENTED", f"方法 '{method}' 的内核尚未实现")
-        part_config = None
-        if request.part is not None:
-            part_config = parts.get(request.part)
-            if part_config is None:
-                raise ApiError(
-                    404, "PART_NOT_FOUND",
-                    f"零件配置 '{request.part}' 不存在;可用: {sorted(parts)}",
-                )
-        params = _resolve_params(spec, settings, part_config, request.params)
-        record = queue.submit(spec=spec, params=params, part=request.part, executor=executor)
-        return SimAccepted(
-            id=record.id,
-            method=spec.name,
-            status=record.status,
-            fidelity=record.fidelity,
-            status_url=f"/jobs/{record.id}",
-        )
+        return _submit(spec, request.part, request.params, settings, parts, queue)
 
     return router
+
+
+def _typed_submit_endpoint(
+    spec: registry.MethodSpec,
+    request_model: type[BaseModel],
+    settings: Settings,
+    parts: dict[str, dict[str, Any]],
+    queue: JobQueue,
+) -> Callable[[BaseModel], SimAccepted]:
+    """工厂生成单方法的类型化提交端点(闭包绑定各自 spec,防循环晚绑定)。"""
+
+    def submit_typed(request):
+        """提交作业并入队;合并优先级 params > part 配置 > 主配置 defaults。"""
+        # exclude_unset 是关键(方案 §4.3):只取调用方显式给的字段(嵌套模型
+        # 递归同语义),防止模型默认值(如 mesh_size_mm=6.0)压掉零件配置的 4.0;
+        # mode="json" 使 dump 与泛化路由收到的原生 JSON dict 完全同型。
+        inline = (
+            request.params.model_dump(exclude_unset=True, mode="json")
+            if request.params is not None
+            else None
+        )
+        return _submit(spec, request.part, inline, settings, parts, queue)
+
+    # __future__ annotations 使函数内注解变字符串,而 get_type_hints 解析不到
+    # 闭包变量 request_model — 直接把真实类型写入 __annotations__ 绕过求值;
+    # __name__ 唯一化,避免 12 个闭包在 OpenAPI operationId 上撞键。
+    submit_typed.__annotations__ = {"request": request_model, "return": SimAccepted}
+    submit_typed.__name__ = "submit_" + spec.name.replace("-", "_")
+    submit_typed.__qualname__ = submit_typed.__name__
+    return submit_typed
+
+
+def _submit(
+    spec: registry.MethodSpec,
+    part: str | None,
+    inline_params: dict[str, Any] | None,
+    settings: Settings,
+    parts: dict[str, dict[str, Any]],
+    queue: JobQueue,
+) -> SimAccepted:
+    """两套提交入口共用的校验+入队管线。
+
+    顺序即 docs/api-brief.md §6.3:503 下线 → 501 未实现 → 404 零件 →
+    400 参数(类型化路由的"未知方法"在路由匹配层就不可达,由泛化兜底 404)。
+    """
+    if spec.name in settings.methods.disabled:
+        raise ApiError(
+            503, "METHOD_DISABLED",
+            f"方法 '{spec.name}' 已被临时下线(config/service.yaml methods.disabled)",
+        )
+    executor = registry.resolve_executor(spec.name)
+    if executor is None:
+        raise ApiError(501, "METHOD_NOT_IMPLEMENTED", f"方法 '{spec.name}' 的内核尚未实现")
+    part_config = None
+    if part is not None:
+        part_config = parts.get(part)
+        if part_config is None:
+            raise ApiError(
+                404, "PART_NOT_FOUND",
+                f"零件配置 '{part}' 不存在;可用: {sorted(parts)}",
+            )
+    params = _resolve_params(spec, settings, part_config, inline_params)
+    record = queue.submit(spec=spec, params=params, part=part, executor=executor)
+    return SimAccepted(
+        id=record.id,
+        method=spec.name,
+        status=record.status,
+        fidelity=record.fidelity,
+        status_url=f"/jobs/{record.id}",
+    )
 
 
 def _resolve_params(

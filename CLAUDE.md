@@ -26,7 +26,9 @@ uv run uvicorn ansys_hip.main:app --port 8010    # 启动服务;Swagger 在 /doc
 请求流水线(跨文件追踪的入口):
 
 ```
-api.py(decorator 路由,统一错误体 ErrorBody{code,message})
+api.py(decorator 路由,统一错误体 ErrorBody{code,message};
+       提交路由由 REGISTRY 循环生成 12 个类型化 POST /sim/{name},
+       泛化 POST /sim/{method} 为兜底(include_in_schema=False),两路共用 _submit 管线)
   → registry.py(REGISTRY 冻结表:MethodSpec 元数据 + 懒加载内核执行器)
   → settings.py merge_params(三级合并,纯函数)
   → queue.py(asyncio 队列;max_concurrent=1 单许可;to_thread 跑同步内核;
