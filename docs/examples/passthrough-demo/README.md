@@ -8,7 +8,8 @@
 | 文件 | 角色 |
 |---|---|
 | `capsule_shrink.inp` | 入口命令流:PLANE183 轴对称;`RECTNG` 自建粉末/包套两区 + `AGLUE` + `AATT`(MAT 1=powder、2=capsule 约定);线弹性占位本构(演示通道,**不背书 HIP 物理**);`NLGEOM,1`;4 段升压载荷步循环;每段写一帧 `frame_N.csv` + 整文件重写 `progress.csv`;末尾写 `deform.csv`(变形几何数据)与 `results.csv`(短标签标量) |
-| `vm1_axial_bar.inp` | **官方 Verification Manual VM1 已知答案 E2E 夹具**:两端固定直杆轴向加载(LINK180,官方命令流形态);官方目标反力 900/600 lb + 解析位移 8.0e-5 / 9.0e-5 in 写进 `results.csv`;写 `progress.csv`(MODEL/SOLVE/POST)与 `disp.csv`(declared)。单位故意保留官方原制 in/lbf/psi —— 验证服务不预设单位制 |
+| `vm1_axial_bar.inp` | **官方 Verification Manual VM1 已知答案 E2E 夹具**:两端固定直杆轴向加载(LINK180,官方命令流形态);官方目标反力 900/600 lb + 解析位移 -8.0e-5 / -9.0e-5 in(载荷向下,位移为负)写进 `results.csv`;写 `progress.csv`(MODEL/SOLVE/POST)与 `disp.csv`(declared)。单位故意保留官方原制 in/lbf/psi —— 验证服务不预设单位制 |
+| `vm3_thermal_support.inp` | **官方 Verification Manual VM3 已知答案 E2E 夹具(热-结构耦合)**:铜/钢三杆并联(LINK180,底部 UY 耦合成刚性梁),ΔT=+10°F + 4000 lb,官方目标热应力 钢 19695 / 铜 10152 psi 写进 `results.csv`(`st_strs`/`cu_strs`/`ratio_st`/`ratio_cu`);写 `progress.csv`(MODEL/SOLVE/POST)与 `disp.csv`(declared)。单位保留官方原制 in/lbf/psi/°F |
 | `submit_demo.py` | httpx 提交脚本:上传 → 提交 → 轮询打印 status+stages → 流式下载工件;注释里有逐阶段等价 curl |
 | `README.md` | 本文件 |
 
@@ -93,6 +94,38 @@ curl -s http://localhost:8010/jobs/<id>/result
 `disp.csv`(declared)+ `progress.csv` / `results.csv` / 入口回声(保留上传
 token 前缀,形如 `ab12…_vm1_axial_bar.inp`)/ `job.out`(自动)。
 (2026-09-11 真 MAPDL v252 实测:13 项断言全过,values 相对误差 0,端到端 ~5 s。)
+
+## VM3 官方算例 E2E(热-结构耦合,已知答案)
+
+VM1 验证纯力学校核;`vm3_thermal_support.inp` 在此之上覆盖**热-结构耦合**
+(双材料热膨胀差 + 机械载荷,更贴近 HIP 场景)。算例与目标值均出自官方
+(Ansys Mechanical APDL Verification Manual VM3,参考解 Timoshenko p.30 prob.9)。
+
+```bash
+curl -s -F 'file=@vm3_thermal_support.inp' http://localhost:8010/uploads/apdl
+# → {"path": "/var/uploads/xxx_vm3_thermal_support.inp", ...}
+
+curl -s -X POST http://localhost:8010/sim/passthrough \
+  -H 'Content-Type: application/json' \
+  -d '{"params": {"entry_file": "/var/uploads/xxx_vm3_thermal_support.inp",
+        "declared_outputs": ["disp.csv"], "workflow": "VM3_E2E"}}'
+# → 202 {"id": "...", "status_url": "/jobs/..."}
+
+# succeeded 后取结果,values 对照下表:
+curl -s http://localhost:8010/jobs/<id>/result
+```
+
+`values` 断言表(**容差 1e-2** —— 官方目标为手册圆整值;`ratio_*` ≈ 1):
+
+| 短标签 | 目标值 | 出处 |
+|---|---|---|
+| `st_strs` | 19695 | 钢杆(中间杆)轴向应力(官方,psi) |
+| `cu_strs` | 10152 | 铜杆(两侧杆)轴向应力(官方,psi) |
+| `ratio_st` / `ratio_cu` | ≈1.0 | 实测/目标 比值 |
+
+同时核对:`stages` 末帧 = `[MODEL, SOLVE, POST]`;工件含 `disp.csv`(declared)+
+自动件 + 入口回声(同 VM1)。
+(2026-09-11 真 MAPDL v252 实测:12 项断言全过,应力相对误差 ~2.5e-5,端到端 ~4 s。)
 
 
 ## 改模板时注意

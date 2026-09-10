@@ -526,12 +526,13 @@ final_powder.step 的几何重构(CAD 重建、STL 包络)是上游职责,本层
 ## 5. 完整例子:示范工程
 
 `docs/examples/passthrough-demo/` 是**自包含**的轴对称包套缩放演示
-(不依赖任何外部几何文件,几何用 `RECTNG` 体素自建),四份文件:
+(不依赖任何外部几何文件,几何用 `RECTNG` 体素自建),五份文件:
 
 | 文件 | 角色 |
 |---|---|
 | `capsule_shrink.inp` | 入口命令流:PLANE183 轴对称;粉末/包套两区 `RECTNG+AGLUE+AATT`(MAT 1=powder、2=capsule);**线弹性占位本构(演示通道,不背书 HIP 物理)**;`NLGEOM,1`;4 段升压载荷步循环;每段后写一帧 `frame_N.csv` + 重写 `progress.csv`;末尾写 `deform.csv`(变形几何数据)与 `results.csv`(短标签标量) |
 | `vm1_axial_bar.inp` | **官方 Verification Manual VM1 已知答案 E2E 夹具**(数值级通道验证,真 MAPDL v252 实测 13 项断言全过):LINK180 两端固定直杆,官方目标反力 900/600 lb 与解析位移 -8.0e-5/-9.0e-5 in 写进 `results.csv`(`r1_lb`/`r2_lb`/`ratio12`/`u2_in`/`u3_in`);单位故意保留官方原制 in/lbf/psi,验证服务不预设单位制;断言表见目录 `README.md` |
+| `vm3_thermal_support.inp` | **官方 Verification Manual VM3 已知答案 E2E 夹具**(热-结构耦合,真 MAPDL v252 实测 12 项断言全过):铜/钢三杆并联(LINK180),ΔT=+10°F + 4000 lb,官方目标热应力 19695/10152 psi 写进 `results.csv`(`st_strs`/`cu_strs`/`ratio_st`/`ratio_cu`);单位保留官方原制 in/lbf/psi/°F;断言表见目录 `README.md` |
 | `submit_demo.py` | httpx 提交脚本:上传 → 提交(`workflow="HIP_DEMO_V1"`)→ 轮询打印 status+stages → 下载工件;每步附等价 curl 注释 |
 | `README.md` | 一分钟跑通说明(含服务端开开关的方法) |
 
