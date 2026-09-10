@@ -141,7 +141,7 @@ class ProcessWindowParams(BaseModel):
 class ShrinkageEstimateParams(BaseModel):
     """均匀收缩估算(方法 shrinkage-estimate)。"""
 
-    initial_relative_density: float = Field(default=0.65, gt=0, lt=1)
+    initial_relative_density: float = Field(default=0.65, gt=0, lt=1, description="初始相对密度")
     final_relative_density: float = Field(default=0.97, gt=0, le=1, description="终态相对密度(或目标)")
     characteristic_lengths_mm: dict[str, float] = Field(
         ...,
@@ -174,9 +174,9 @@ class MeshMethodParams(BaseModel):
 class AxisymProfile(BaseModel):
     """轴对称 2D 剖面(mm);缺省从几何包围盒自动生成等效矩形环。"""
 
-    inner_radius_mm: float | None = Field(default=None, gt=0, examples=[20])
-    outer_radius_mm: float | None = Field(default=None, gt=0, examples=[50])
-    height_mm: float | None = Field(default=None, gt=0, examples=[150])
+    inner_radius_mm: float | None = Field(default=None, gt=0, description="内半径(mm);实心粉末为 None/0", examples=[20])
+    outer_radius_mm: float | None = Field(default=None, gt=0, description="外半径(mm)", examples=[50])
+    height_mm: float | None = Field(default=None, gt=0, description="轴向高度(mm)", examples=[150])
 
 
 class AxisymHipParams(BaseModel):
@@ -184,8 +184,8 @@ class AxisymHipParams(BaseModel):
 
     geometry: GeometryRef | None = Field(default=None, description="几何(用于自动剖面);None 需给 profile")
     profile: AxisymProfile | None = Field(default=None, description="显式 2D 剖面;优先于 geometry 自动推导")
-    cycle: Cycle | None = None
-    materials: MaterialSelection | None = None
+    cycle: Cycle | None = Field(default=None, description="工艺曲线;None 继承配置链默认(900℃/120MPa/3h)")
+    materials: MaterialSelection | None = Field(default=None, description="材料;None 用默认 TC4 + 20 钢")
     mesh: MeshSettings = Field(default_factory=MeshSettings)
     numerics: Numerics = Field(default_factory=Numerics)
     nlgeom: bool = Field(default=False, description="大变形开关(冒烟阶段建议 False)")
@@ -194,26 +194,26 @@ class AxisymHipParams(BaseModel):
 class AxisymThermalParams(BaseModel):
     """升温段温度场(方法 axisym-thermal;真实内核:纯热瞬态)。"""
 
-    geometry: GeometryRef | None = None
-    profile: AxisymProfile | None = None
+    geometry: GeometryRef | None = Field(default=None, description="几何(用于自动剖面);None 需给 profile")
+    profile: AxisymProfile | None = Field(default=None, description="显式 2D 剖面;优先于 geometry 自动推导")
     cycle: Cycle | None = Field(default=None, description="取其温度 ramp;压力忽略")
-    materials: MaterialSelection | None = None
+    materials: MaterialSelection | None = Field(default=None, description="材料;None 用默认 TC4 + 20 钢")
     mesh: MeshSettings = Field(default_factory=MeshSettings)
     numerics: Numerics = Field(default_factory=Numerics)
     probe_points: list[tuple[float, float]] = Field(
         default=[(0.0, 0.5), (0.0, 0.0)],
-        description="探针点 (r, z) 归一化坐标 → 输出 T-t 曲线(芯部/表面)",
+        description="探针点 (r, z) 归一化坐标 → 输出 T-t 曲线(缺省芯部+底面);≤99 个(探针号受 APDL 写出宽度限制)",
     )
 
 
 class AxisymMechanicalParams(BaseModel):
     """保温段应力/密度分布(方法 axisym-mechanical;阶段 1 冒烟=线弹性)。"""
 
-    geometry: GeometryRef | None = None
-    profile: AxisymProfile | None = None
+    geometry: GeometryRef | None = Field(default=None, description="几何(用于自动剖面);None 需给 profile")
+    profile: AxisymProfile | None = Field(default=None, description="显式 2D 剖面;优先于 geometry 自动推导")
     hold_temperature_c: float = Field(default=900, description="保温温度(℃)")
     hold_pressure_mpa: float = Field(default=120, description="保温压力(MPa)")
-    materials: MaterialSelection | None = None
+    materials: MaterialSelection | None = Field(default=None, description="材料;None 用默认 TC4 + 20 钢")
     mesh: MeshSettings = Field(default_factory=MeshSettings)
 
 
@@ -221,26 +221,26 @@ class Full3dHipParams(BaseModel):
     """3D 全模型 HIP(方法 full3d-hip;阶段 1 冒烟=真实网格+线性占位本构)。"""
 
     geometry: GeometryRef = Field(..., description="capsule_step 必填")
-    cycle: Cycle | None = None
-    materials: MaterialSelection | None = None
+    cycle: Cycle | None = Field(default=None, description="工艺曲线;None 继承配置链默认(900℃/120MPa/3h)")
+    materials: MaterialSelection | None = Field(default=None, description="材料;None 用默认 TC4 + 20 钢")
     mesh: MeshSettings = Field(default_factory=MeshSettings)
-    nlgeom: bool = Field(default=False)
+    nlgeom: bool = Field(default=False, description="大变形开关(冒烟阶段建议 False)")
 
 
 class ExperimentalPoint(BaseModel):
     """实验密度数据点。"""
 
-    time_s: float = Field(..., ge=0)
-    relative_density: float = Field(..., gt=0, le=1)
+    time_s: float = Field(..., ge=0, description="采样时刻(秒)")
+    relative_density: float = Field(..., gt=0, le=1, description="相对密度(0-1)")
 
 
 class CalibrateParams(BaseModel):
     """本构参数标定(方法 calibrate;阶段 1=Arrhenius 最小二乘)。"""
 
     experimental: list[ExperimentalPoint] = Field(..., min_length=3, description="实验 D-t 数据(≥3 点)")
-    initial_relative_density: float = Field(default=0.65, gt=0, lt=1)
-    limiting_relative_density: float = Field(default=0.995, gt=0, le=1)
-    cycle: Cycle | None = None
+    initial_relative_density: float = Field(default=0.65, gt=0, lt=1, description="初始相对密度")
+    limiting_relative_density: float = Field(default=0.995, gt=0, le=1, description="极限相对密度")
+    cycle: Cycle | None = Field(default=None, description="实验对应的工艺曲线;None 继承配置链默认")
     fit_params: list[Literal["k_ref", "q_j_per_mol", "pressure_exponent"]] = Field(
         default=["k_ref", "q_j_per_mol"],
         description="拟合哪些动力学参数(其余固定)",
@@ -251,7 +251,7 @@ class CompensateParams(BaseModel):
     """型腔预变形补偿(方法 compensate;阶段 1=均匀收缩缩放)。"""
 
     geometry: GeometryRef = Field(..., description="cavity_step=目标型腔(必填)")
-    initial_relative_density: float = Field(default=0.65, gt=0, lt=1)
+    initial_relative_density: float = Field(default=0.65, gt=0, lt=1, description="初始相对密度")
     final_relative_density: float = Field(default=0.97, gt=0, le=1, description="或由 densification 结果取终态密度")
     scale_axis: Literal["uniform", "per_axis"] = Field(default="uniform", description="均匀/各向异性缩放")
 
@@ -291,52 +291,60 @@ class SimAccepted(BaseModel):
     """作业受理响应(202)。"""
 
     id: str = Field(..., description="作业 ID", examples=["9d2f..."])
-    method: str
-    status: JobStatusEnum = JobStatusEnum.PENDING
-    fidelity: Fidelity | None = None
-    status_url: str = Field(..., examples=["/jobs/9d2f..."])
+    method: str = Field(..., description="方法名", examples=["densification"])
+    status: JobStatusEnum = Field(default=JobStatusEnum.PENDING, description="受理后固定为 pending")
+    fidelity: Fidelity | None = Field(
+        default=None, description="方法标称保真度:real=真实内核 / smoke=占位本构冒烟"
+    )
+    status_url: str = Field(..., description="轮询地址(GET /jobs/{id})", examples=["/jobs/9d2f..."])
 
 
 class JobState(BaseModel):
     """GET /jobs/{id} 响应。"""
 
-    id: str
-    method: str
-    part: str | None = None
-    status: JobStatusEnum
-    fidelity: Fidelity | None = None
-    created_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    error: ErrorBody | None = None
-    log_url: str | None = None
-    result_url: str | None = None
-    artifacts_url: str | None = None
+    id: str = Field(..., description="作业 ID")
+    method: str = Field(..., description="方法名")
+    part: str | None = Field(default=None, description="提交时引用的零件配置名(未引用为 None)")
+    status: JobStatusEnum = Field(..., description="状态机:pending → running → succeeded / failed / cancelled")
+    fidelity: Fidelity | None = Field(default=None, description="结果保真度:real=真实内核 / smoke=占位本构冒烟")
+    created_at: str = Field(..., description="受理时刻(ISO 8601)")
+    started_at: str | None = Field(default=None, description="开始执行时刻;排队中为 None")
+    finished_at: str | None = Field(default=None, description="结束时刻;未结束为 None")
+    error: ErrorBody | None = Field(
+        default=None, description="失败原因(仅 failed 时非空;含机器可读错误码)"
+    )
+    log_url: str | None = Field(default=None, description="日志端点(GET /jobs/{id}/log,纯文本)")
+    result_url: str | None = Field(default=None, description="结果端点(GET /jobs/{id}/result;仅 succeeded 可取)")
+    artifacts_url: str | None = Field(
+        default=None, description="工件列表端点(GET /jobs/{id}/artifacts,含下载链接拼法)"
+    )
 
 
 class PartInfo(BaseModel):
     """GET /parts 响应条目。"""
 
-    name: str
-    config: dict[str, Any]
+    name: str = Field(..., description="零件配置名(config/parts/<name>.yaml 的文件名)")
+    config: dict[str, Any] = Field(..., description="该零件完整配置(几何/材料/曲线/网格,提交时按三级合并继承)")
 
 
 class HealthReport(BaseModel):
     """GET /health 响应。"""
 
-    status: Literal["ok", "degraded"]
-    mapdl_found: bool
-    license_env_set: bool
-    queue_running: int
-    queue_pending: int
-    version: str
+    status: Literal["ok", "degraded"] = Field(
+        ..., description="ok=MAPDL 与许可齐备;degraded=缺任一(此时提交仿真作业会失败)"
+    )
+    mapdl_found: bool = Field(..., description="MAPDL 可执行文件存在且具可执行位")
+    license_env_set: bool = Field(..., description="许可已配置(.lic 文件存在,或 port@host 形式)")
+    queue_running: int = Field(..., description="正在运行的作业数")
+    queue_pending: int = Field(..., description="排队等待的作业数")
+    version: str = Field(..., description="服务版本号")
 
 
 class UploadAccepted(BaseModel):
     """POST /uploads(multipart STEP)响应 — 返回服务端路径供 geometry 引用。"""
 
-    path: str
-    size_bytes: int
+    path: str = Field(..., description="服务端保存路径(填入 geometry.capsule_step / cavity_step 引用)")
+    size_bytes: int = Field(..., description="文件大小(字节)")
 
 
 # ---------------------------------------------------------------------------

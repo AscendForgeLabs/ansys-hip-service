@@ -64,7 +64,8 @@ FastAPI / pydantic v2 / numpy / scipy / gmsh / meshio。
 | `sensitivity` | 反演/优化 | available | real | 5–60 s | — | — | 参数敏感性:逐参数批量跑致密化核,输出各参数对终态密度的敏感度排序 |
 
 分组标签:快速计算(解析/数值秒级)/ 2D 轴对称 FEM(MAPDL)/ 3D 全模型 FEM(MAPDL)/ 反演优化。
-各方法参数字段(含默认值与示例)见 Swagger;参数模型定义于 `src/ansys_hip/schemas.py`(冻结契约)。
+**各方法参数字段级说明(类型/默认值/合并粒度/结果形态)见 `docs/methods-reference.md`**;
+参数模型定义于 `src/ansys_hip/schemas.py`(冻结契约)。
 
 ## 5. 保真度契约(real / smoke)
 

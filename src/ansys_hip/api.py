@@ -18,7 +18,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    FastAPI,
+    File,
+    HTTPException,
+    Path as PathParam,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ValidationError
@@ -312,7 +322,7 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         return record
 
     @router.get("/{job_id}", response_model=JobState, summary="查询作业状态")
-    def get_job(job_id: str) -> JobState:
+    def get_job(job_id: str = PathParam(description="作业 ID(受理响应的 id)")) -> JobState:
         """作业状态机快照:pending → running → succeeded/failed/cancelled。"""
         return queue.state(require_job(job_id))
 
@@ -322,8 +332,11 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         summary="作业日志(支持 tail)",
     )
     def get_job_log(
-        job_id: str,
-        tail: int | None = Query(default=None, ge=1, le=LOG_TAIL_MAX_LINES),
+        job_id: str = PathParam(description="作业 ID"),
+        tail: int | None = Query(
+            default=None, ge=1, le=LOG_TAIL_MAX_LINES,
+            description="只取最后 N 行;缺省返回全文",
+        ),
     ) -> PlainTextResponse:
         """job.log 全文;?tail=N 只取最后 N 行。"""
         record = require_job(job_id)
@@ -346,7 +359,7 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
             409: {"model": ErrorBody, "description": "未完成/已取消/已失败,无结果"},
         },
     )
-    def get_job_result(job_id: str) -> JSONResponse:
+    def get_job_result(job_id: str = PathParam(description="作业 ID")) -> JSONResponse:
         """内核返回的结果 JSON;仅 succeeded 状态可取。"""
         record = require_job(job_id)
         if record.status in (JobStatusEnum.PENDING, JobStatusEnum.RUNNING):
@@ -370,7 +383,7 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         summary="列出工件文件",
         responses={404: {"model": ErrorBody, "description": "作业不存在"}},
     )
-    def list_artifacts(job_id: str) -> list[str]:
+    def list_artifacts(job_id: str = PathParam(description="作业 ID")) -> list[str]:
         """作业 artifacts/ 目录内的工件文件名(按名排序),供 /artifacts/{name} 下载。"""
         record = require_job(job_id)
         artifacts_dir = record.job_dir / ARTIFACTS_DIRNAME
@@ -386,7 +399,10 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
             404: {"model": ErrorBody, "description": "作业或工件不存在"},
         },
     )
-    def get_artifact(job_id: str, name: str) -> FileResponse:
+    def get_artifact(
+        job_id: str = PathParam(description="作业 ID"),
+        name: str = PathParam(description="工件文件名(取自 GET /jobs/{id}/artifacts)"),
+    ) -> FileResponse:
         """下载作业 artifacts/ 目录内的工件(名称禁止路径分隔符与 '..')。"""
         record = require_job(job_id)
         artifact_path = _resolve_artifact_path(record.job_dir, name)
@@ -398,7 +414,7 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         summary="取消并删除作业",
         responses={404: {"model": ErrorBody, "description": "作业不存在"}},
     )
-    def delete_job(job_id: str) -> Response:
+    def delete_job(job_id: str = PathParam(description="作业 ID")) -> Response:
         """pending/running 先取消(运行中会防御性终止内核),再清理作业目录。"""
         record = require_job(job_id)
         if record.status in ACTIVE_STATUSES:
@@ -448,7 +464,7 @@ def _parts_router(parts: dict[str, dict[str, Any]]) -> APIRouter:
         summary="零件配置详情",
         responses={404: {"model": ErrorBody, "description": "零件不存在(PART_NOT_FOUND)"}},
     )
-    def get_part(name: str) -> PartInfo:
+    def get_part(name: str = PathParam(description="零件配置名(可用清单见 GET /parts)")) -> PartInfo:
         """单个零件的完整配置 dict(几何/材料/曲线/网格/numerics)。"""
         config = parts.get(name)
         if config is None:
