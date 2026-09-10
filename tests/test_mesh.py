@@ -33,7 +33,12 @@ from ansys_hip.kernels.fem import (
     run_mesh,
 )
 from ansys_hip.kernels.materials import load_material
-from ansys_hip.mesh import exterior_faces_from_cdb, mesh_capsule_powder, step_bbox
+from ansys_hip.mesh import (
+    TET_FACE_TO_SOLID45,
+    exterior_faces_from_cdb,
+    mesh_capsule_powder,
+    step_bbox,
+)
 from ansys_hip.registry import KernelError
 from ansys_hip.results import extract_error_lines, parse_series_csv, parse_summary_csv
 from ansys_hip.schemas import (
@@ -210,8 +215,8 @@ class TestExteriorFaces:
         faces = exterior_faces_from_cdb(cdb)
         assert len(faces) > 0
         assert all(1 <= elem <= result["element_count"] for elem, _ in faces)
-        # 退化 SOLID45 六面体面号:四面体面 1-4 映射到 3/5/2/1(面 4/6 为凝聚面)
-        assert all(face in {1, 2, 3, 5} for _, face in faces)
+        # 载荷面号 = TET_FACE_TO_SOLID45 的值域(四面体面 1-4 → 3/5/2/1)
+        assert all(face in set(TET_FACE_TO_SOLID45.values()) for _, face in faces)
         # 单元四面共 4 面,外表面必是全部面的严格子集
         total_faces = 4 * result["element_count"]
         assert len(faces) < total_faces

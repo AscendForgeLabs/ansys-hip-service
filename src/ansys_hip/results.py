@@ -21,6 +21,10 @@ SERIES_FILENAME = "series.csv"
 # MAPDL 输出中的错误行特征(job.out 中同时用于 CONVERGENCE_FAILED 诊断)
 ERROR_LINE_KEYWORDS: tuple[str, ...] = ("ERROR", "FATAL")
 
+# MAPDL 结尾/中途的统计行前缀(如 "NUMBER OF ERROR MESSAGES ENCOUNTERED= N"),
+# 含 ERROR 关键字但不是错误,提取时排除
+STATISTICS_LINE_PREFIXES: tuple[str, ...] = ("NUMBER OF", "THE NUMBER OF")
+
 # 提取错误行上限(KernelError message 面向人读,过载无益)
 MAX_ERROR_LINES = 40
 
@@ -40,9 +44,8 @@ def extract_error_lines(out_text: str) -> list[str]:
         for raw in out_text.splitlines()
         for stripped in (raw.strip(),)
         if stripped
-        and not stripped.upper().startswith("NUMBER OF")
-        and not stripped.upper().startswith("THE NUMBER OF")
         and any(keyword in stripped for keyword in ERROR_LINE_KEYWORDS)
+        and not stripped.upper().startswith(STATISTICS_LINE_PREFIXES)
     ]
     return lines[:MAX_ERROR_LINES]
 

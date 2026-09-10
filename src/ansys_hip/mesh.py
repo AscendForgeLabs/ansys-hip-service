@@ -39,6 +39,10 @@ GROUP_CAPSULE_TAG = 2
 
 # 网格:一阶四面体(gmsh 元素类型 4 = 4 节点四面体;MAPDL 侧 SOLID45)
 TET_ELEMENT_TYPE = 4
+# 四面体面(与节点 i 相对,1-4)→ 退化 SOLID45 六面体载荷面号;
+# 由单四面体 SFE/反力实测得出:1→3, 2→5, 3→2, 4→1(六面体面 4/6 为
+# 退化凝聚面,SFE 加压会被 "condensed face" 警告忽略)
+TET_FACE_TO_SOLID45: dict[int, int] = {1: 3, 2: 5, 3: 2, 4: 1}
 MESH_STEM = "capsule_powder"
 SUPPORTED_FORMATS = ("cdb", "msh", "stl")
 DEFAULT_FORMATS = ("cdb",)
@@ -379,12 +383,9 @@ def exterior_faces_from_cdb(cdb_path: Path | str) -> list[tuple[int, int]]:
     """解析自产 .cdb,返回外边界面列表 [(单元号, SOLID45 载荷面号), ...]。
 
     供 3D 模板直接 SFE 加均压外压(绕开 ESURF/SURF154):
-    单元号 = E 命令出现顺序(1 起)。四面体面按"与节点 i 相对"编号(1-4),
-    再映射到退化 SOLID45 六面体面号 — 映射由单四面体 SFE/反力实测得出
-    (四面体面 1→六面体面 3,2→5,3→2,4→1;六面体面 4/6 为退化凝聚面,
-    加压会被 "condensed face" 警告忽略)。
+    单元号 = E 命令出现顺序(1 起);载荷面号 = 四面体面经
+    TET_FACE_TO_SOLID45 映射(实测出处见该常量注释)。
     """
-    tet_face_to_solid45 = {1: 3, 2: 5, 3: 2, 4: 1}
     path = Path(cdb_path)
     if not path.is_file():
         raise KernelError("INTERNAL", f".cdb 网格工件不存在: {path}")
@@ -401,7 +402,7 @@ def exterior_faces_from_cdb(cdb_path: Path | str) -> list[tuple[int, int]]:
         missing_position = next(
             index for index, node in enumerate(tets[first_tet]) if node not in key
         )
-        faces.append((first_tet + 1, tet_face_to_solid45[missing_position + 1]))
+        faces.append((first_tet + 1, TET_FACE_TO_SOLID45[missing_position + 1]))
     return sorted(faces)
 
 

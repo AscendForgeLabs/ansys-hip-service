@@ -64,6 +64,12 @@ DEFAULT_CAPSULE = "20steel"
 PROBE_NAMES_DEFAULT = ("core", "surface")
 SECTION_SAMPLE_COUNT = 11
 CDB_STEM = "capsule_powder"
+# summary.csv APDL 短标签(标签须 ≤8 字符,超长被 MAPDL 字符字面量截断)
+# → API 结果键;模板侧写出的其余短标签(t_final/p_hold/tmax_prN)暂无读回方
+SUMMARY_LABELS: dict[str, str] = {
+    "displacement_max_mm": "disp_max",
+    "von_mises_max_mpa": "vm_max",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +186,7 @@ def run_axisym_hip(params: AxisymHipParams, ctx: RunContext) -> dict:
     }
     summary = parse_summary_csv(ctx.job_dir)
     return {
-        "displacement_max_mm": _summary_float(summary, "disp_max"),
-        "von_mises_max_mpa": _summary_float(summary, "vm_max"),
+        **_mechanical_extremes(summary),
         "time_history": time_history,
         "artifacts": ["axisym_hip.inp", *publish_artifacts(
             ctx, (SERIES_FILENAME, SUMMARY_FILENAME)
@@ -223,8 +228,7 @@ def run_axisym_mechanical(params: AxisymMechanicalParams, ctx: RunContext) -> di
     ]
     summary = parse_summary_csv(ctx.job_dir)
     return {
-        "displacement_max_mm": _summary_float(summary, "disp_max"),
-        "von_mises_max_mpa": _summary_float(summary, "vm_max"),
+        **_mechanical_extremes(summary),
         "section_stress": section_stress,
         "artifacts": ["axisym_mechanical.inp", *publish_artifacts(
             ctx, (SERIES_FILENAME, SUMMARY_FILENAME)
@@ -276,8 +280,7 @@ def run_full3d_hip(params: Full3dHipParams, ctx: RunContext) -> dict:
     )
     summary = parse_summary_csv(ctx.job_dir)
     return {
-        "displacement_max_mm": _summary_float(summary, "disp_max"),
-        "von_mises_max_mpa": _summary_float(summary, "vm_max"),
+        **_mechanical_extremes(summary),
         "deformed_stl": None,  # 阶段 2(UPGEOM+变形网格导出);见汇报缺陷记录
         "artifacts": [f"{CDB_STEM}.cdb", "full3d_hip.inp", *publish_artifacts(
             ctx, (SUMMARY_FILENAME,)
@@ -460,6 +463,14 @@ def _summary_float(summary: dict, key: str) -> float:
     if isinstance(value, (int, float)):
         return round(float(value), 6)
     raise KernelError("INTERNAL", f"summary.csv 缺少或不可解析的键: {key}(实际 {value!r})")
+
+
+def _mechanical_extremes(summary: dict) -> dict[str, float]:
+    """位移/等效应力极值对(API 键 → summary.csv APDL 短标签映射见 SUMMARY_LABELS)。"""
+    return {
+        result_key: _summary_float(summary, label)
+        for result_key, label in SUMMARY_LABELS.items()
+    }
 
 
 def _linspace(start: float, stop: float, count: int) -> list[float]:

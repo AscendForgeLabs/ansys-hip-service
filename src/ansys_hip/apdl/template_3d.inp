@@ -3,7 +3,7 @@
 ! 3D 全模型 HIP(阶段 1 冒烟:真实网格+线弹性)— SOLID45
 ! 网格读自命令流 .cdb(/INPUT;MAT 1=powder 2=capsule 已随单元赋好)
 ! 外表面均压:Python 侧从 .cdb 提取外边界面 → SFE 逐面直加(绕开 ESURF)
-! 3-2-1 点约束防刚体位移;summary.csv 给位移/等效应力极值
+! 3-2-1 分布式约束防刚体位移;summary.csv 给位移/等效应力极值
 ! 生成: ansys-hip-service kernels/fem.py(template_3d.inp)
 ! ============================================================
 /PREP7
@@ -18,14 +18,10 @@ NSEL,S,LOC,Z,{{ z_min|g }} $ D,ALL,UZ,0
 NSEL,S,LOC,X,{{ x_min|g }} $ D,ALL,UX,0
 NSEL,S,LOC,Y,{{ y_min|g }} $ D,ALL,UY,0
 ALLSEL,ALL
-{% if nlgeom %}
-NLGEOM,1
-{% else %}
-NLGEOM,0
-{% endif %}
+NLGEOM,{{ 1 if nlgeom else 0 }}
 /SOLU
 ANTYPE,STATIC
-! ---- 外表面均压(全部外边界面;面号与 E 序缺失节点位置对应) ----
+! ---- 外表面均压(全部外边界面;面号 = 四面体→退化 SOLID45 映射,见 mesh.py) ----
 {% for elem, face in pressure_faces %}
 SFE,{{ elem }},{{ face }},PRES,,{{ hold_pressure_mpa|g }}
 {% endfor %}

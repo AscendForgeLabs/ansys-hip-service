@@ -32,11 +32,7 @@ D,ALL,UX,0
 NSEL,S,LOC,Y,{{ z_from|g }}
 D,ALL,UY,0
 ALLSEL,ALL
-{% if nlgeom %}
-NLGEOM,1
-{% else %}
-NLGEOM,0
-{% endif %}
+NLGEOM,{{ 1 if nlgeom else 0 }}
 /SOLU
 ANTYPE,STATIC
 KBC,0
