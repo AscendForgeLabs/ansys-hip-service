@@ -14,7 +14,9 @@
 !
 ! 官方目标值(E2E 断言口径,见 README):
 !   R1(y=10 端) = 900 lb,R2(y=0 端) = 600 lb
-!   解析补充(A = 1 in^2、EA = 30e6 lb):u2 = 8.0e-5 in、u3 = 9.0e-5 in
+!   解析补充(A = 1 in^2、EA = 30e6 lb):u2 = -8.0e-5 in、u3 = -9.0e-5 in
+!   (载荷向下 -Y:下段受压 N=-600 → ε=-2e-5/in,位移为负;u(10)=0 闭合自洽。
+!    2026-09-11 真 MAPDL v252 E2E 实测逐位对上,见目录 README 断言表)
 !
 ! 单位:故意保留官方原制 in / lbf / psi —— 顺带验证 passthrough
 ! 不预设单位制(忠实转发,单位自洽归 .inp 作者,passthrough-guide §4.1)。
@@ -98,8 +100,8 @@ RATIO = R1A/R2A               ! 目标 1.5
 ALLSEL,ALL
 
 ! ---- 节点位移(解析已知答案)----
-*GET,U2N,NODE,2,U,Y           ! 目标 8.0e-5 in
-*GET,U3N,NODE,3,U,Y           ! 目标 9.0e-5 in
+*GET,U2N,NODE,2,U,Y           ! 目标 -8.0e-5 in(载荷向下,位移为负)
+*GET,U3N,NODE,3,U,Y           ! 目标 -9.0e-5 in
 
 ! ---- disp.csv:全节点 y 坐标 + UY(declared_outputs 声明)----
 *GET,NNOD,NODE,,COUNT

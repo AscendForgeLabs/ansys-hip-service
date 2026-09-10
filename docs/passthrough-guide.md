@@ -9,7 +9,7 @@
 >
 > 单位约定:**mm / MPa / s / ℃**。**passthrough 是唯一提交通道**:历史的类型化
 > 方法 API(full3d-hip 等 12 个)已整体移除、不再兼容(上游确认完全跟随本服务);
-> 类型化方法的历史文档已随方法库一并移除(需要时查 git 历史),对接以本文为准。
+> `docs/api-brief.md` / `docs/methods-reference.md` 仅作历史存档,对接以本文为准。
 
 ---
 
@@ -72,7 +72,7 @@ passthrough 是**唯一提交通道**(`POST /sim/passthrough`,结果
 
 上游《ansys 下游》文档的立场——"业务编排层不碰 MAPDL 命令"——在单通道下依然成立:
 命令流归上游**工作流作者**(引擎之外的专职角色),业务编排层同样不碰。
-历史方法文档已随方法库移除(查 git 历史);
+历史方法文档(`docs/api-brief.md`、`docs/methods-reference.md`)仅作存档;
 历史网格资产(.cdb,按 MAT 1=powder/2=capsule 约定)仍可直接复用(§4.1)。
 
 ### 1.3 为何不直接暴露 RSM / PyMAPDL(以及它们的正交位置)
@@ -149,8 +149,8 @@ passthrough 是**唯一提交通道**(`POST /sim/passthrough`,结果
 
 ## 3. HTTP 交付全流程
 
-端点一览(`/health` 等通用端点以服务 `openapi()` 为准;`/parts` 属历史零件
-机制已移除;`/sim/methods` 仍在,返回单方法自描述清单):
+端点一览(`/health` 等通用端点以服务 `openapi()` 为准;`/sim/methods`、`/parts`
+属历史方法机制,已随类型化通道一并移除):
 
 | 端点 | 方法 | 用途 |
 |---|---|---|
@@ -171,9 +171,6 @@ curl -s -F 'file=@capsule_shrink.inp' http://localhost:8010/uploads/apdl
 ```
 
 - 扩展名白名单:`.inp .cdb .mac .csv .txt`;文件名消毒取 `Path.name`,落盘 `<token>_<原名>`;
-- 本端点与提交端点**同受 passthrough 开关门控**(关闭时 403 `PASSTHROUGH_DISABLED`,
-  不留旁路上传面);单文件上限 1 GiB(超限 413 `PAYLOAD_TOO_LARGE`,半写文件即清);
-  上传文件按作业保留期清扫;
 - 历史 `/uploads`(.step 几何通道)已随类型化方法一并移除 —— APDL 侧文件一律走本端点;
 - **响应结构同既有上传**:`{path, size_bytes}`;`path` 是服务端绝对路径,
   后续填进 `entry_file` / `extra_files`;
@@ -338,7 +335,7 @@ with httpx.Client(timeout=60) as client:
 
 | code | 场景 | HTTP |
 |---|---|---|
-| `PASSTHROUGH_DISABLED` | **新增**。passthrough 开关关闭时提交(`POST /sim/passthrough` 或泛化 `POST /sim/{method}`)或上传(`POST /uploads/apdl`,与提交同受门控);选 403 便于区分"端点不存在"与"被策略关闭" | 403 |
+| `PASSTHROUGH_DISABLED` | **新增**。passthrough 开关关闭时提交(`POST /sim/passthrough` 或泛化 `POST /sim/passthrough`);选 403 便于区分"端点不存在"与"被策略关闭" | 403 |
 | `INVALID_PARAMS` | 参数校验失败:字段类型/缺失、`declared_outputs` 空/超 64、文件名含路径分隔符或不可打印字符、撞保留名(§3.2) | 400 |
 | `PART_NOT_FOUND` | 历史零件配置引用(`part` 字段已随类型化方法移除;passthrough 不使用) | 404 |
 | `GEOMETRY_NOT_FOUND` | geometry STEP 路径不存在或不可读(历史类型化方法;passthrough 不涉及) | 404 |
@@ -423,8 +420,6 @@ SET,LAST
 ### 4.3 declared_outputs 声明规则
 
 - 裸文件名(**不含路径**),如 `frame_1.csv`;数量 1–64,自动去重;
-- **不得与入口/附属文件同名**(输入会被复制进作业目录根部,同名会让缺件检查
-  被"自我满足"—— MAPDL 零产出也算成功;提交时 400 `INVALID_PARAMS` 拒绝);
 - 作业成功结束时**逐个存在性检查:缺一即作业 failed,`error.code = ARTIFACT_NOT_FOUND`**
   (这是"服务无逻辑"的关键契约 —— 服务不懂你的物理输出,但保证"说好交付的一定在");
 - 拼写即契约:`*CFOPEN,frame_1,csv` 写出的是 `frame_1.csv`,声明写成
@@ -531,7 +526,7 @@ final_powder.step 的几何重构(CAD 重建、STL 包络)是上游职责,本层
 | 文件 | 角色 |
 |---|---|
 | `capsule_shrink.inp` | 入口命令流:PLANE183 轴对称;粉末/包套两区 `RECTNG+AGLUE+AATT`(MAT 1=powder、2=capsule);**线弹性占位本构(演示通道,不背书 HIP 物理)**;`NLGEOM,1`;4 段升压载荷步循环;每段后写一帧 `frame_N.csv` + 重写 `progress.csv`;末尾写 `deform.csv`(变形几何数据)与 `results.csv`(短标签标量) |
-| `vm1_axial_bar.inp` | **官方 Verification Manual VM1 已知答案 E2E 夹具**(数值级通道验证):LINK180 两端固定直杆,官方目标反力 900/600 lb 与解析位移 8.0e-5/9.0e-5 in 写进 `results.csv`(`r1_lb`/`r2_lb`/`ratio12`/`u2_in`/`u3_in`);单位故意保留官方原制 in/lbf/psi,验证服务不预设单位制;断言表见目录 `README.md` |
+| `vm1_axial_bar.inp` | **官方 Verification Manual VM1 已知答案 E2E 夹具**(数值级通道验证,真 MAPDL v252 实测 13 项断言全过):LINK180 两端固定直杆,官方目标反力 900/600 lb 与解析位移 -8.0e-5/-9.0e-5 in 写进 `results.csv`(`r1_lb`/`r2_lb`/`ratio12`/`u2_in`/`u3_in`);单位故意保留官方原制 in/lbf/psi,验证服务不预设单位制;断言表见目录 `README.md` |
 | `submit_demo.py` | httpx 提交脚本:上传 → 提交(`workflow="HIP_DEMO_V1"`)→ 轮询打印 status+stages → 下载工件;每步附等价 curl 注释 |
 | `README.md` | 一分钟跑通说明(含服务端开开关的方法) |
 

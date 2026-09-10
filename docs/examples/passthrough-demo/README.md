@@ -86,11 +86,13 @@ curl -s http://localhost:8010/jobs/<id>/result
 | `r1_lb` | 900 | y=10 端反力(官方) |
 | `r2_lb` | 600 | y=0 端反力(官方) |
 | `ratio12` | 1.5 | R1/R2 |
-| `u2_in` | 8.0e-5 | 节点 2 位移(解析,A=1 in²、EA=30e6 lb) |
-| `u3_in` | 9.0e-5 | 节点 3 位移(解析,同上) |
+| `u2_in` | -8.0e-5 | 节点 2 位移(解析,A=1 in²、EA=30e6 lb;载荷向下 → 位移为负) |
+| `u3_in` | -9.0e-5 | 节点 3 位移(解析,同上) |
 
 同时核对:`stages` 末帧 = `[MODEL, SOLVE, POST]`;工件含
-`disp.csv`(declared)+ `progress.csv` / `results.csv` / 入口回声 / `job.out`(自动)。
+`disp.csv`(declared)+ `progress.csv` / `results.csv` / 入口回声(保留上传
+token 前缀,形如 `ab12…_vm1_axial_bar.inp`)/ `job.out`(自动)。
+(2026-09-11 真 MAPDL v252 实测:13 项断言全过,values 相对误差 0,端到端 ~5 s。)
 
 
 ## 改模板时注意
