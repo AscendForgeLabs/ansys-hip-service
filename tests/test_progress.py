@@ -24,6 +24,9 @@ from ansys_hip.api import create_app
 from ansys_hip.results import PROGRESS_FILENAME, parse_progress_csv
 from ansys_hip.schemas import JobStage
 
+# 复用 passthrough 测试工具(tests/ 在 sys.path;开通道的 Settings 与上传助手)
+from test_passthrough import enabled_settings, upload_apdl
+
 POLL_INTERVAL_S = 0.02
 WAIT_TIMEOUT_S = 10.0
 
@@ -174,28 +177,36 @@ def wait_for_terminal(client: TestClient, job_id: str) -> dict[str, Any]:
 
 
 class TestQueueProjection:
-    def test_running_and_terminal_reflect_sidecar(self, client, fake_executors):
+    @staticmethod
+    def _submit_sidecar_job(client: TestClient, params_extra: dict[str, Any] | None = None):
+        """经 passthrough 通道提交作业(上传 entry 后 POST /sim/passthrough)。"""
+        entry = upload_apdl(client, "demo.inp")
+        params = {"entry_file": entry, "declared_outputs": ["results.csv"]}
+        if params_extra:
+            params.update(params_extra)
+        response = client.post("/sim/passthrough", json={"params": params})
+        assert response.status_code == 202, response.text
+        return response.json()
+
+    def test_running_and_terminal_reflect_sidecar(self, settings_factory, fake_executors):
         # Arrange:running 期间可见首帧(实时),终态保留末帧快照
         release = threading.Event()
-        fake_executors["densification"] = SidecarKernel(release)
+        fake_executors["passthrough"] = SidecarKernel(release)
+        with TestClient(create_app(enabled_settings(settings_factory))) as client:
+            job_id = self._submit_sidecar_job(client)["id"]
 
-        # Act
-        accepted = client.post("/sim/densification", json={"part": "tc4-demo"})
-        assert accepted.status_code == 202, accepted.text
-        job_id = accepted.json()["id"]
+            running = poll_until(
+                client, job_id,
+                lambda state: state["status"] == "running" and state["stages"] is not None,
+            )
+            # Assert(running → 实时;分两步避免轮询窗口里已写末帧时误判)
+            assert running["stages"] in (
+                [{"label": "HEAT", "time_s": 3600.0}],
+                [{"label": "HEAT", "time_s": 3600.0}, {"label": "HOLD", "time_s": 7200.0}],
+            )
 
-        running = poll_until(
-            client, job_id,
-            lambda state: state["status"] == "running" and state["stages"] is not None,
-        )
-        # Assert(running → 实时;分两步避免轮询窗口里已写末帧时误判)
-        assert running["stages"] in (
-            [{"label": "HEAT", "time_s": 3600.0}],
-            [{"label": "HEAT", "time_s": 3600.0}, {"label": "HOLD", "time_s": 7200.0}],
-        )
-
-        release.set()
-        final = wait_for_terminal(client, job_id)
+            release.set()
+            final = wait_for_terminal(client, job_id)
         # Assert(终态 → 末帧快照,文件在盘上自然保留)
         assert final["status"] == "succeeded"
         assert final["stages"] == [
@@ -203,44 +214,42 @@ class TestQueueProjection:
             {"label": "HOLD", "time_s": 7200.0},
         ]
 
-    def test_pending_job_stages_is_none(self, client, fake_executors):
+    def test_pending_job_stages_is_none(self, settings_factory, fake_executors):
         # Arrange:单并发队列,首个作业阻塞 → 第二个作业停在 pending(尚无文件)
         release = threading.Event()
-        fake_executors["densification"] = SidecarKernel(release)
-        first = client.post("/sim/densification", json={"part": "tc4-demo"})
-        assert first.status_code == 202
-        poll_until(client, first.json()["id"], lambda s: s["status"] == "running")
+        fake_executors["passthrough"] = SidecarKernel(release)
+        with TestClient(create_app(enabled_settings(settings_factory))) as client:
+            first_id = self._submit_sidecar_job(client)["id"]
+            poll_until(client, first_id, lambda s: s["status"] == "running")
 
-        second = client.post("/sim/densification", json={"part": "tc4-demo"})
-        assert second.status_code == 202
+            second = self._submit_sidecar_job(client)
 
-        # Act
-        pending = client.get(f"/jobs/{second.json()['id']}").json()
+            # Act
+            pending = client.get(f"/jobs/{second['id']}").json()
 
-        # Assert
-        assert pending["status"] == "pending"
-        assert pending["stages"] is None
+            # Assert
+            assert pending["status"] == "pending"
+            assert pending["stages"] is None
 
-        release.set()
-        wait_for_terminal(client, first.json()["id"])
-        wait_for_terminal(client, second.json()["id"])
+            release.set()
+            wait_for_terminal(client, first_id)
+            wait_for_terminal(client, second["id"])
 
-    def test_no_sidecar_response_matches_legacy_field_set(self, client, fake_executors):
-        # 钉测:12 个既有方法无侧车 → 响应键集 = 现状全集 + stages,且 stages=None
-        fake_executors["material-query"] = lambda params, ctx: {"fidelity": "real"}
+    def test_no_sidecar_response_matches_legacy_field_set(self, settings_factory, fake_executors):
+        # 钉测:无侧车作业(passthrough 未写 progress.csv)→ 响应键集 = 全集 + stages,
+        # 且 stages=None(与既有方法形态一致)
+        fake_executors["passthrough"] = lambda params, ctx: {"fidelity": "passthrough"}
+        with TestClient(create_app(enabled_settings(settings_factory))) as client:
+            job_id = self._submit_sidecar_job(client)["id"]
 
-        accepted = client.post("/sim/material-query", json={})
-        assert accepted.status_code == 202
-        job_id = accepted.json()["id"]
+            final = wait_for_terminal(client, job_id)
 
-        final = wait_for_terminal(client, job_id)
-
-        assert final["status"] == "succeeded"
-        assert set(final.keys()) == LEGACY_JOB_STATE_KEYS | {"stages"}
-        assert final["stages"] is None
-        assert final["method"] == "material-query"
-        assert final["error"] is None
-        assert final["result_url"] == f"/jobs/{job_id}/result"
+            assert final["status"] == "succeeded"
+            assert set(final.keys()) == LEGACY_JOB_STATE_KEYS | {"stages"}
+            assert final["stages"] is None
+            assert final["method"] == "passthrough"
+            assert final["error"] is None
+            assert final["result_url"] == f"/jobs/{job_id}/result"
 
 
 # ---------------------------------------------------------------------------
