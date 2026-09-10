@@ -28,6 +28,7 @@ ENV_OVERRIDES: tuple[tuple[str, str, str], ...] = (
     ("ANSYS_BIN", "ansys", "bin"),
     ("ANSYSLMD_LICENSE_FILE", "ansys", "license_file"),
     ("HIP_SERVICE_JOBS_DIR", "storage", "jobs_dir"),
+    ("HIP_SERVICE_PASSTHROUGH_ENABLED", "passthrough", "enabled"),
 )
 
 
@@ -97,6 +98,19 @@ class MethodsConfig(BaseModel):
     disabled: tuple[str, ...] = ()
 
 
+class PassthroughConfig(BaseModel):
+    """直通通道开关(POST /sim/passthrough,任意 APDL 输入直接交 MAPDL 执行)。
+
+    安全前提:开启即暴露任意 APDL 执行面(APDL 可读写文件、起系统命令),
+    仅限受控内网 + 明确信任上游时开启;默认关闭,提交路由回 403
+    PASSTHROUGH_DISABLED(区别于 404 端点不存在与 503 方法下线)。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+
+
 class Settings(BaseModel):
     """服务全量配置(不可变);config_path/parts_dir 由加载过程注入。"""
 
@@ -108,6 +122,7 @@ class Settings(BaseModel):
     storage: StorageConfig = StorageConfig()
     defaults: DefaultsConfig = DefaultsConfig()
     methods: MethodsConfig = MethodsConfig()
+    passthrough: PassthroughConfig = PassthroughConfig()
     config_path: Path = DEFAULT_CONFIG_PATH
     parts_dir: Path = DEFAULT_CONFIG_PATH.parent / PARTS_DIRNAME
 

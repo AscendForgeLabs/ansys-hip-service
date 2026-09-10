@@ -1,4 +1,4 @@
-"""方法注册表(冻结版)— 12 个计算方法的元数据与执行器解析.
+"""方法注册表(冻结版)— 13 个计算方法的元数据与执行器解析.
 
 API 层(/sim/*)只依赖本注册表;内核实现方(T3/T4)按签名约定提供
 `run_<method>(params, ctx) -> dict`,注册表按需懒加载,缺失时返回
@@ -23,6 +23,7 @@ from .schemas import (
     Full3dHipParams,
     MaterialQueryParams,
     MeshMethodParams,
+    PassthroughParams,
     ProcessWindowParams,
     SensitivityParams,
     ShrinkageEstimateParams,
@@ -42,14 +43,18 @@ class KernelError(Exception):
         self.message = message
 
 
-Group = Literal["quick", "fem2d", "fem3d", "inverse"]
+Group = Literal["quick", "fem2d", "fem3d", "inverse", "passthrough"]
 
 GROUP_LABELS: dict[Group, str] = {
     "quick": "快速计算(解析/数值秒级)",
     "fem2d": "2D 轴对称 FEM(MAPDL)",
     "fem3d": "3D 全模型 FEM(MAPDL)",
     "inverse": "反演/优化",
+    "passthrough": "直通通道(上游自带 APDL 输入)",
 }
+
+# 直通通道方法名(api 层开关闸门与类型化路由跳过逻辑据此判定,勿散落字面量)
+PASSTHROUGH_METHOD = "passthrough"
 
 
 @dataclass(frozen=True)
@@ -251,6 +256,20 @@ REGISTRY: dict[str, MethodSpec] = {
         params_model=SensitivityParams,
         tags=("oat"),
     ),
+    # ---- 直通通道(需 passthrough.enabled=true,默认关闭 → 403) ----
+    "passthrough": MethodSpec(
+        name="passthrough",
+        group="passthrough",
+        status="experimental",
+        fidelity="real",   # 注册表口径须为 real/smoke(queue.Fidelity 枚举);实际保真度由内核结果 dict 的 fidelity="passthrough" 表达
+        summary="直通通道:上游自带 APDL 输入(.inp/.cdb/.mac)直接交 MAPDL 执行,服务只治理作业/队列/超时/工件(需 passthrough.enabled=true)",
+        returns="{artifacts[], returncode, elapsed_s, values?}(values 仅当入口写出 results.csv)",
+        typical_runtime="取决于入口输入(受 ansys.job_timeout_s 或 timeout_s 约束)",
+        requires_mapdl=True,
+        requires_geometry=False,
+        params_model=PassthroughParams,
+        tags=("apdl", "raw-mapdl"),
+    ),
 }
 
 
@@ -265,6 +284,7 @@ KERNEL_MODULES: tuple[str, ...] = (
     "calibrate",    # T3: calibrate
     "materials",    # T3: material-query(读 data/materials.yaml)
     "fem",          # T4: axisym-* / full3d-hip / mesh(APDL+gmsh 管线)
+    "passthrough",  # T1: passthrough(上游自带 APDL 输入直通执行)
 )
 
 Executor = Callable[[BaseModel, Any], dict]
@@ -298,6 +318,6 @@ def resolve_executor(method: str) -> Executor | None:
 
 def methods_payload() -> list[dict[str, Any]]:
     """GET /sim/methods 响应体:按组排序的全部方法自描述。"""
-    order = {"quick": 0, "fem2d": 1, "fem3d": 2, "inverse": 3}
+    order = {"quick": 0, "fem2d": 1, "fem3d": 2, "inverse": 3, "passthrough": 4}
     specs = sorted(REGISTRY.values(), key=lambda s: (order[s.group], s.name))
     return [s.public_dict() for s in specs]

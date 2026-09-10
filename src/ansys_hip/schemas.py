@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +109,8 @@ class ErrorBody(BaseModel):
 # 错误码约定(全服务统一):
 #   INVALID_PARAMS / PART_NOT_FOUND / GEOMETRY_NOT_FOUND / METHOD_DISABLED
 #   MAPDL_NOT_FOUND / LICENSE_UNAVAILABLE / CONVERGENCE_FAILED / TIMEOUT / INTERNAL
+#   PASSTHROUGH_DISABLED(403,直通通道未开启:与 404 端点不存在、503 方法下线区分)
+#   ARTIFACT_NOT_FOUND(404 工件下载缺件;passthrough 声明输出缺失时内核复用此码)
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +285,101 @@ class SensitivityParams(MethodParamsBase):
 
 
 # ---------------------------------------------------------------------------
+# 直通通道(方法 passthrough):上游自带 APDL 输入直接交 MAPDL 执行
+# ---------------------------------------------------------------------------
+
+# 作业目录根部的簿记文件/目录名:entry/extra 复制进根部、declared_outputs 从根部
+# 发布,均不得占用(否则覆盖 state/result 簿记或劫持 progress.csv 阶段进度侧车)
+RESERVED_JOB_DIR_NAMES = frozenset({
+    "state.json", "resolved-params.json", "result.json", "job.log",
+    "job.out", "launcher.log", "progress.csv", "artifacts",
+})
+
+# 声明输出数量上限(防一次性发布海量文件刷屏 artifacts 清单)
+PASSTHROUGH_MAX_DECLARED_OUTPUTS = 64
+
+
+def _validate_bare_filename(value: str, field_label: str) -> str:
+    """裸文件名规则(沿用 uploads 消毒风格):非空、无路径分隔符、
+    非 '.'/'..'、不含不可打印字符;服务簿记保留名拒绝。
+
+    抛 ValueError(pydantic 包装为校验错误 → 400 INVALID_PARAMS)。
+    """
+    is_illegal = (
+        not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or any(not character.isprintable() for character in value)
+    )
+    if is_illegal:
+        raise ValueError(
+            f"{field_label} 必须是裸文件名(禁止路径分隔符/'..'/不可打印字符): '{value}'"
+        )
+    if value in RESERVED_JOB_DIR_NAMES:
+        raise ValueError(f"{field_label} '{value}' 是作业目录保留名,不可占用")
+    return value
+
+
+class PassthroughParams(MethodParamsBase):
+    """直通通道参数(方法 passthrough,需 config passthrough.enabled=true)。
+
+    入口与附属文件先经 POST /uploads/apdl 上传,此处引用服务端路径;
+    服务按原名复制进作业目录根部后以 MAPDL 批处理执行(入口内的相对引用
+    自然解析)。服务不做任何仿真逻辑,只治理作业/队列/超时/工件。
+    """
+
+    entry_file: str = Field(
+        ...,
+        min_length=1,
+        description="APDL 入口文件的服务端路径(POST /uploads/apdl 返回的 path);以 MAPDL -i 直接执行,须位于上传目录内",
+        examples=["/var/uploads/aB3xK9_job.inp"],
+    )
+    extra_files: list[str] = Field(
+        default_factory=list,
+        description="附属文件的服务端路径(.cdb/.mac/.csv/.txt 等);按原名复制进作业目录根部,供入口 /INPUT、*GET 等相对引用",
+        examples=[["/var/uploads/cD9mQ2_capsule.cdb"]],
+    )
+    declared_outputs: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=PASSTHROUGH_MAX_DECLARED_OUTPUTS,
+        description="执行结束后必须存在的输出文件名(裸文件名,写在作业目录根部,如 final.cdb);缺失 → 作业 failed(ARTIFACT_NOT_FOUND);重复条目去重(保序)",
+        examples=[["final.cdb", "results.csv"]],
+    )
+    timeout_s: int | None = Field(
+        default=None, gt=0,
+        description="本作业执行超时(秒);None 用全局 ansys.job_timeout_s;实际生效值 = min(本值, 全局上限)",
+        examples=[7200],
+    )
+    workflow: str | None = Field(
+        default=None,
+        description="纯溯源标注(上游工作流名/版本号);仅随参数落盘 resolved-params.json,服务不据此分支",
+        examples=["hip-demo/1.2"],
+    )
+
+    @field_validator("declared_outputs")
+    @classmethod
+    def _dedupe_declared_outputs(cls, value: list[str]) -> list[str]:
+        """逐条按裸文件名校验(含保留名),再保序去重(归一结果落盘可追溯)。"""
+        validated = [
+            _validate_bare_filename(name, "declared_outputs 条目") for name in value
+        ]
+        return list(dict.fromkeys(validated))
+
+    @model_validator(mode="after")
+    def _validate_file_basenames(self) -> "PassthroughParams":
+        """entry/extra 的 basename 同受保留名约束(复制进根部会占用同名簿记文件)。"""
+        for label, paths in (
+            ("entry_file", (self.entry_file,)),
+            ("extra_files 条目", self.extra_files),
+        ):
+            for path in paths:
+                _validate_bare_filename(Path(path).name, label)
+        return self
+
+
+# ---------------------------------------------------------------------------
 # 请求/响应信封
 # ---------------------------------------------------------------------------
 
@@ -299,6 +396,22 @@ class SimRequest(BaseModel):
     params: dict[str, Any] | None = Field(
         default=None,
         description="内联参数(对应各方法参数模型的顶层字段,如 {initial_relative_density: 0.68})",
+    )
+
+
+class PassthroughSimRequest(BaseModel):
+    """POST /sim/passthrough 请求体:{params}(无 part 概念 — 直通不引用零件配置)。
+
+    HIPForm AnsysClient.submit(method, params) 发送的正是 {"params": {...}},
+    该形态对本端点零改动可用;extra=forbid 防顶层键拼错被静默吞掉
+    (params 缺失由下游统一 400 INVALID_PARAMS)。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    params: PassthroughParams | None = Field(
+        default=None,
+        description="直通通道参数(必给;字段与校验规则见 PassthroughParams)",
     )
 
 
@@ -352,6 +465,10 @@ class HealthReport(BaseModel):
     license_env_set: bool = Field(..., description="许可已配置(.lic 文件存在,或 port@host 形式)")
     queue_running: int = Field(..., description="正在运行的作业数")
     queue_pending: int = Field(..., description="排队等待的作业数")
+    passthrough_enabled: bool = Field(
+        ...,
+        description="直通通道开关(config passthrough.enabled);关闭时 POST /sim/passthrough 回 403 PASSTHROUGH_DISABLED",
+    )
     version: str = Field(..., description="服务版本号")
 
 

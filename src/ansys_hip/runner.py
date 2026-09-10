@@ -16,6 +16,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from .registry import KernelError
@@ -76,12 +77,22 @@ def cancel_job(job_id: str) -> bool:
     return True
 
 
-def run_mapdl(inp_path: Path, job_dir: Path, ctx: RunContext, job_id: str) -> dict:
+def run_mapdl(
+    inp_path: Path,
+    job_dir: Path,
+    ctx: RunContext,
+    job_id: str,
+    required_outputs: Sequence[str] | None = (SUMMARY_FILENAME,),
+) -> dict:
     """以批处理模式执行 inp:轮询等待,超时/取消 killpg,输出诊断。
 
     成功返回 {"returncode", "elapsed_s", "out_path"};失败抛 KernelError:
         MAPDL_NOT_FOUND / TIMEOUT / LICENSE_UNAVAILABLE /
         CONVERGENCE_FAILED(附 job.out 错误行) / INTERNAL
+
+    required_outputs:正常结束后必须存在于 job_dir 的文件名清单(缺任一 → INTERNAL)。
+    None = 跳过该检查(直通通道由内核按 declared_outputs 自行判定产出)。
+    既有调用方不传 → 默认 (summary.csv,),行为与历史版本逐字节一致。
     """
     bin_path = Path(ctx.ansys_bin)
     if not bin_path.is_file():
@@ -142,11 +153,14 @@ def run_mapdl(inp_path: Path, job_dir: Path, ctx: RunContext, job_id: str) -> di
             "CONVERGENCE_FAILED",
             f"MAPDL 求解失败(退出码 {process.returncode}),job.out 关键行:\n{detail}",
         )
-    if not (job_dir / SUMMARY_FILENAME).is_file():
-        raise KernelError(
-            "INTERNAL",
-            "MAPDL 正常结束但未产出 summary.csv(检查模板结果写出与求解是否真正执行)",
-        )
+    if required_outputs is not None:
+        missing = [name for name in required_outputs if not (job_dir / name).is_file()]
+        if missing:
+            raise KernelError(
+                "INTERNAL",
+                f"MAPDL 正常结束但未产出 {', '.join(missing)}"
+                "(检查模板结果写出与求解是否真正执行)",
+            )
     return {
         "returncode": process.returncode,
         "elapsed_s": round(elapsed_s, 3),

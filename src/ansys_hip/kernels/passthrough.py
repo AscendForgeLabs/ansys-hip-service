@@ -1,0 +1,107 @@
+"""直通通道内核 — 上游自带 APDL 输入直接交 MAPDL 执行(方法 passthrough)。
+
+服务侧零仿真逻辑,只做治理:校验入口/附属文件 → 按原名复制进作业目录根部
+(MAPDL 以根部为 cwd,入口内的相对引用自然解析)→ runner 批处理执行
+(不检查 summary.csv,产出改由 declared_outputs 判定)→ 发布工件。
+
+发布面(全部裸文件名,复制进 artifacts/ 供下载):入口文件、job.out
+(无条件,失败作业也留排查证据)、results.csv(可选结构化结果,存在才发布)、
+declared_outputs;声明输出缺失 → KernelError(ARTIFACT_NOT_FOUND)在
+发布之后抛出 — 存在的产出与 job.out 已可下载。
+
+结果 dict 契约:
+    {fidelity: "passthrough", artifacts[], returncode, elapsed_s, values?}
+    values 仅当 results.csv 存在(标签,数值 两列,标签沿用 summary.csv
+    短标签约定 ≤8 字符);缺席不带该键。
+"""
+
+from __future__ import annotations
+
+import shutil
+import time
+from pathlib import Path
+
+from ..registry import KernelError
+from ..results import OUT_FILENAME, RESULTS_FILENAME, parse_results_csv
+from ..runner import run_mapdl
+from ..schemas import RESERVED_JOB_DIR_NAMES, PassthroughParams, RunContext
+from . import publish_artifacts
+
+
+def run_passthrough(params: PassthroughParams, ctx: RunContext) -> dict:
+    """直通执行:暂存输入 → MAPDL 批处理 → 发布并校验声明产出。"""
+    started = time.monotonic()
+    entry_dest, _extra_dests = _stage_inputs(params, ctx.job_dir)
+    kernel_ctx = _with_clamped_timeout(ctx, params.timeout_s)
+    outcome = run_mapdl(
+        entry_dest,
+        ctx.job_dir,
+        kernel_ctx,
+        ctx.job_dir.name,       # 作业名约定与 fem 内核一致(= job_id)
+        required_outputs=None,  # 产出由 declared_outputs 判定,不检查 summary.csv
+    )
+
+    values = parse_results_csv(ctx.job_dir)
+    # 保序去重:results.csv 可能同时出现在可选结果与声明清单中
+    candidates = list(dict.fromkeys([
+        entry_dest.name,
+        OUT_FILENAME,
+        *([RESULTS_FILENAME] if values is not None else []),
+        *params.declared_outputs,
+    ]))
+    published = publish_artifacts(ctx, candidates)
+    missing = [name for name in params.declared_outputs if name not in published]
+    if missing:
+        raise KernelError(
+            "ARTIFACT_NOT_FOUND",
+            f"声明输出未产出: {missing}(job.out 已发布,可下载排查)",
+        )
+
+    result = {
+        "fidelity": "passthrough",
+        "artifacts": published,
+        "returncode": outcome["returncode"],
+        "elapsed_s": round(time.monotonic() - started, 3),
+    }
+    if values is not None:
+        result["values"] = values
+    return result
+
+
+def _stage_inputs(params: PassthroughParams, job_dir: Path) -> tuple[Path, list[Path]]:
+    """校验入口/附属文件 → 按原名复制进 job_dir 根部;返回 (入口, 附属列表) 的目标路径。
+
+    校验:入口存在且非空、附属存在、basename 不撞保留名且互不冲突
+    (复制而非引用:作业自包含才可复算/审计,上传文件可能先于作业被清退)。
+    """
+    entry = Path(params.entry_file)
+    if not entry.is_file() or entry.stat().st_size == 0:
+        raise KernelError("INVALID_PARAMS", f"入口文件不存在或为空: {params.entry_file}")
+    extras = [Path(path) for path in params.extra_files]
+    for path in extras:
+        if not path.is_file():
+            raise KernelError("INVALID_PARAMS", f"附属文件不存在: {path}")
+
+    sources = (entry, *extras)
+    for label, source in zip(("入口", "附属"), sources):
+        if source.name in RESERVED_JOB_DIR_NAMES:
+            raise KernelError(
+                "INVALID_PARAMS", f"{label}文件 '{source.name}' 是作业目录保留名"
+            )
+    names = [source.name for source in sources]
+    if len(set(names)) != len(names):
+        raise KernelError(
+            "INVALID_PARAMS", f"入口/附属文件 basename 冲突,无法同名复制: {sorted(names)}"
+        )
+
+    destinations = [job_dir / name for name in names]
+    for source, dest in zip(sources, destinations):
+        shutil.copyfile(source, dest)
+    return destinations[0], destinations[1:]
+
+
+def _with_clamped_timeout(ctx: RunContext, timeout_s: int | None) -> RunContext:
+    """用户超时与全局上限取小;model_copy 生成新实例,不改原 ctx(queue 零改动)。"""
+    if timeout_s is None:
+        return ctx
+    return ctx.model_copy(update={"job_timeout_s": min(timeout_s, ctx.job_timeout_s)})

@@ -388,19 +388,19 @@ def test_service_defaults_materials_used_when_part_omits(
 # 方法注册表与 /sim/methods
 # ---------------------------------------------------------------------------
 
-def test_methods_endpoint_lists_all_twelve(client):
+def test_methods_endpoint_lists_all_thirteen(client):
     # Act
     response = client.get("/sim/methods")
 
     # Assert
     assert response.status_code == 200
     methods = response.json()
-    assert len(methods) == 12
+    assert len(methods) == 13
     names = {method["name"] for method in methods}
     assert names == {
         "densification", "process-window", "shrinkage-estimate", "material-query",
         "mesh", "axisym-hip", "axisym-thermal", "axisym-mechanical",
-        "full3d-hip", "calibrate", "compensate", "sensitivity",
+        "full3d-hip", "calibrate", "compensate", "sensitivity", "passthrough",
     }
     by_name = {method["name"]: method for method in methods}
     assert by_name["densification"]["group"] == "quick"

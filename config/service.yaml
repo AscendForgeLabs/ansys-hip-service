@@ -40,3 +40,10 @@ defaults:
 
 methods:
   disabled: []          # 例: ["full3d-hip"] 可临时下线某方法
+
+# 直通通道(POST /sim/passthrough):上游自带 APDL 输入直接交 MAPDL 执行。
+# 安全前提:开启即暴露任意 APDL 执行面(APDL 可读写文件、起系统命令),
+# 仅限受控内网 + 明确信任上游时开启;默认关闭,提交路由回 403 PASSTHROUGH_DISABLED。
+# 可用环境变量 HIP_SERVICE_PASSTHROUGH_ENABLED=true 覆盖。
+passthrough:
+  enabled: false

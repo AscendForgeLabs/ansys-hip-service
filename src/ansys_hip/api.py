@@ -41,6 +41,8 @@ from .schemas import (
     JobState,
     JobStatusEnum,
     PartInfo,
+    PassthroughParams,
+    PassthroughSimRequest,
     SimAccepted,
     SimRequest,
     UploadAccepted,
@@ -60,6 +62,9 @@ SERVICE_DESCRIPTION = (
 )
 
 ALLOWED_UPLOAD_SUFFIXES = frozenset({".step", ".stp", ".stl"})
+# 直通通道上传白名单:MAPDL 文本类输入(入口 .inp/.mac、模型 .cdb、数据 .csv/.txt);
+# 可执行/二进制格式一律拒绝
+APDL_UPLOAD_SUFFIXES = frozenset({".inp", ".cdb", ".mac", ".csv", ".txt"})
 UPLOAD_ID_TOKEN_BYTES = 6
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 LOG_TAIL_MAX_LINES = 10_000
@@ -97,6 +102,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if resolved_settings.passthrough.enabled:
+            logger.warning(
+                "passthrough 直通通道已开启(config passthrough.enabled=true):"
+                "任意 APDL 输入将直接交 MAPDL 执行(APDL 可读写文件、起系统命令),"
+                "仅限受控内网 + 明确信任上游"
+            )
         await queue.start()
         try:
             yield
@@ -112,7 +123,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.queue = queue
     app.include_router(_health_router(resolved_settings, queue))
-    # sim 路由不统一打 tags:12 个类型化端点各按方法组(注册表 GROUP_LABELS)折叠展示
+    # sim 路由不统一打 tags:13 个类型化端点各按方法组(注册表 GROUP_LABELS)折叠展示
+    # (12 个循环生成 + passthrough 手写,见 _sim_router)
     app.include_router(_sim_router(resolved_settings, parts, queue), prefix="/sim")
     app.include_router(_jobs_router(queue), prefix="/jobs", tags=["jobs"])
     app.include_router(_parts_router(parts), prefix="/parts", tags=["parts"])
@@ -149,6 +161,7 @@ def _health_router(settings: Settings, queue: JobQueue) -> APIRouter:
             license_env_set=license_env_set,
             queue_running=queue_running,
             queue_pending=queue_pending,
+            passthrough_enabled=settings.passthrough.enabled,
             version=__version__,
         )
 
@@ -178,6 +191,13 @@ _SUBMIT_RESPONSES: dict[int, dict[str, Any]] = {
     404: {"model": ErrorBody, "description": "零件不存在(PART_NOT_FOUND)"},
     501: {"model": ErrorBody, "description": "内核尚未实现(METHOD_NOT_IMPLEMENTED)"},
     503: {"model": ErrorBody, "description": "方法已临时下线(METHOD_DISABLED)"},
+}
+
+# 直通端点专用:在共用错误响应之上补 403(开关关闭;区别于 404/503,
+# 上游可据此区分"端点不存在"与"策略性关闭")
+_PASSTHROUGH_SUBMIT_RESPONSES: dict[int, dict[str, Any]] = {
+    **_SUBMIT_RESPONSES,
+    403: {"model": ErrorBody, "description": "直通通道未开启(PASSTHROUGH_DISABLED)"},
 }
 
 # 各类型化端点的 Swagger 请求示例(值一律取自真实 e2e/测试用例,不编造)
@@ -332,6 +352,20 @@ _TYPED_ROUTE_EXAMPLES: dict[str, dict[str, dict[str, Any]]] = {
             },
         },
     },
+    "passthrough": {
+        "直通执行入口 inp": {
+            "summary": "上传的入口 .inp + 附属 .cdb,声明产出与超时(test_passthrough 用例)",
+            "value": {
+                "params": {
+                    "entry_file": "/var/uploads/aB3xK9_job.inp",
+                    "extra_files": ["/var/uploads/cD9mQ2_capsule.cdb"],
+                    "declared_outputs": ["final.cdb", "results.csv"],
+                    "timeout_s": 7200,
+                    "workflow": "hip-demo/1.2",
+                }
+            },
+        },
+    },
 }
 
 
@@ -361,6 +395,23 @@ def _typed_route_description(spec: registry.MethodSpec) -> str:
     return "\n".join(lines)
 
 
+def _passthrough_route_description(spec: registry.MethodSpec) -> str:
+    """直通端点 description:安全前提/调用流程/结果形态(不复用
+    _typed_route_description — 其 part/三级合并语汇对本方法不适用)。"""
+    lines = [
+        spec.summary,
+        "",
+        f"- 返回:`{spec.returns}`",
+        f"- 典型耗时:{spec.typical_runtime}",
+        "- 安全前提:开启即暴露任意 APDL 执行面,仅限受控内网 + 明确信任上游;"
+        "关闭时本端点回 `403 PASSTHROUGH_DISABLED`。",
+        "- 调用流程:入口/附属文件先经 `POST /uploads/apdl` 上传,再以服务端路径"
+        "引用;执行结束后声明输出缺失 → 作业 failed(`ARTIFACT_NOT_FOUND`)。",
+        "- `workflow` 为纯溯源标注(落盘 resolved-params.json),服务不据此分支。",
+    ]
+    return "\n".join(lines)
+
+
 def _examples_openapi_extra(
     examples: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
@@ -380,16 +431,18 @@ def _sim_router(
     @router.get(
         "/methods",
         response_model=list[dict[str, Any]],
-        summary="方法自描述清单(12 个)",
+        summary="方法自描述清单(13 个)",
         tags=["sim"],
     )
     def list_methods() -> list[dict[str, Any]]:
         """按组排序的全部方法元数据,含各方法参数模型的 JSON Schema。"""
         return registry.methods_payload()
 
-    # 12 个类型化路由(先注册,先匹配):请求体 = <Method>SimRequest{part, params},
+    # 12 个既有方法的类型化路由(先注册,先匹配):请求体 = <Method>SimRequest{part, params},
     # params 即该方法的参数模型 → Swagger 字段级表单 + pydantic 提前校验(含 extra=forbid)。
     for spec in registry.REGISTRY.values():
+        if spec.name == registry.PASSTHROUGH_METHOD:
+            continue  # 直通通道请求体无 part 概念,走下方手写路由
         request_model = create_model(
             f"{_camel_case(spec.name)}SimRequest",
             # wrapper 同样 forbid:顶层键拼错(如 "paramz")若被默认 ignore 吞掉,
@@ -415,6 +468,34 @@ def _sim_router(
             responses=_SUBMIT_RESPONSES,
             openapi_extra=_examples_openapi_extra(_TYPED_ROUTE_EXAMPLES.get(spec.name)),
         )(_typed_submit_endpoint(spec, request_model, settings, parts, queue))
+
+    # 直通通道(手写类型化路由,Swagger 可见):请求体 = PassthroughSimRequest{params},
+    # 与 HIPForm AnsysClient.submit(method, params) 发送的 {"params": {...}} 同形。
+    # 开闸检查在 _submit 管线内(泛化路径同样生效)。
+    passthrough_spec = registry.REGISTRY[registry.PASSTHROUGH_METHOD]
+
+    @router.post(
+        "/passthrough",
+        response_model=SimAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+        summary=passthrough_spec.summary,
+        description=_passthrough_route_description(passthrough_spec),
+        tags=[registry.GROUP_LABELS[passthrough_spec.group]],
+        responses=_PASSTHROUGH_SUBMIT_RESPONSES,
+        openapi_extra=_examples_openapi_extra(
+            _TYPED_ROUTE_EXAMPLES.get(passthrough_spec.name)
+        ),
+    )
+    def submit_passthrough(request: PassthroughSimRequest) -> SimAccepted:
+        """提交直通作业:入口 APDL 原样交 MAPDL 执行,服务只治理作业/超时/工件。"""
+        # exclude_unset + mode="json" 与类型化循环同语义:只取显式给出的字段,
+        # dump 与泛化路由收到的原生 JSON dict 完全同型。
+        inline = (
+            request.params.model_dump(exclude_unset=True, mode="json")
+            if request.params is not None
+            else None
+        )
+        return _submit(passthrough_spec, None, inline, settings, parts, queue)
 
     # 泛化兜底(后注册,不在 Swagger 展示):已知方法已被上面的类型化路由截获,
     # 本处理器实际只对未知方法名可达(404);端点保留是为维持既有 URL 形态 —
@@ -484,9 +565,16 @@ def _submit(
 ) -> SimAccepted:
     """两套提交入口共用的校验+入队管线。
 
-    顺序即 docs/api-brief.md §6.3:503 下线 → 501 未实现 → 404 零件 →
-    400 参数(类型化路由的"未知方法"在路由匹配层就不可达,由泛化兜底 404)。
+    顺序:403 直通关闸(先于一切 — 策略性关闭不泄露后续任何校验行为)→
+    503 下线 → 501 未实现 → 404 零件 → 400 参数(passthrough 随后附加上传
+    目录限定);类型化路由的"未知方法"在路由匹配层就不可达,由泛化兜底 404。
     """
+    if spec.name == registry.PASSTHROUGH_METHOD and not settings.passthrough.enabled:
+        raise ApiError(
+            403, "PASSTHROUGH_DISABLED",
+            "直通通道未开启(config/service.yaml passthrough.enabled=false;"
+            "安全前提:开启即暴露任意 APDL 执行面)",
+        )
     if spec.name in settings.methods.disabled:
         raise ApiError(
             503, "METHOD_DISABLED",
@@ -504,6 +592,8 @@ def _submit(
                 f"零件配置 '{part}' 不存在;可用: {sorted(parts)}",
             )
     params = _resolve_params(spec, settings, part_config, inline_params)
+    if spec.name == registry.PASSTHROUGH_METHOD:
+        _validate_passthrough_uploads(params, settings)
     record = queue.submit(spec=spec, params=params, part=part, executor=executor)
     return SimAccepted(
         id=record.id,
@@ -535,6 +625,26 @@ def _resolve_params(
         return spec.params_model.model_validate(merged)
     except ValidationError as exc:
         raise ApiError(400, "INVALID_PARAMS", _validation_summary(exc)) from exc
+
+
+def _validate_passthrough_uploads(params: PassthroughParams, settings: Settings) -> None:
+    """直通参数的 API 边界限定:entry/extra 必须位于上传目录内。
+
+    这些文件会被复制进作业目录根部并作为工件发布 — 若放开任意服务端路径,
+    即构成"任意可读文件 → 工件下载"的外泄面。resolve 后做包含性判定
+    (与 _resolve_artifact_path 同模式,符号链接越界同样被挡)。
+    """
+    uploads_root = settings.uploads_root
+    labeled = [
+        ("entry_file", params.entry_file),
+        *((f"extra_files[{index}]", path) for index, path in enumerate(params.extra_files)),
+    ]
+    for label, path_text in labeled:
+        if uploads_root not in Path(path_text).resolve().parents:
+            raise ApiError(
+                400, "INVALID_PARAMS",
+                f"{label} 必须位于上传目录内(先经 POST /uploads/apdl 上传): {path_text}",
+            )
 
 
 def _validation_summary(exc: ValidationError) -> str:
@@ -719,7 +829,7 @@ def _parts_router(parts: dict[str, dict[str, Any]]) -> APIRouter:
 
 
 # ---------------------------------------------------------------------------
-# uploads:几何上传
+# uploads:几何上传 / APDL 上传(直通通道入口与附属文件)
 # ---------------------------------------------------------------------------
 
 def _uploads_router(settings: Settings) -> APIRouter:
@@ -736,20 +846,47 @@ def _uploads_router(settings: Settings) -> APIRouter:
         file: UploadFile = File(..., description="几何文件,扩展名 .step/.stp/.stl"),
     ) -> UploadAccepted:
         """multipart 上传 → var/uploads/<id>_<原名>;返回服务端绝对路径供 geometry 引用。"""
-        original_name = Path(file.filename or "").name  # 消毒:去掉任何路径部分
-        suffix = Path(original_name).suffix.lower()
-        if not original_name or suffix not in ALLOWED_UPLOAD_SUFFIXES:
-            shown = file.filename or "(未提供文件名)"
-            raise ApiError(
-                400, "INVALID_PARAMS",
-                f"不支持的文件 '{shown}';允许的扩展名: {sorted(ALLOWED_UPLOAD_SUFFIXES)}",
-            )
-        target = uploads_root / f"{secrets.token_urlsafe(UPLOAD_ID_TOKEN_BYTES)}_{original_name}"
-        size_bytes = await _save_upload(file, target)
-        logger.info("几何上传: %s(%d 字节)", target, size_bytes)
-        return UploadAccepted(path=str(target.resolve()), size_bytes=size_bytes)
+        return await _accept_upload(file, uploads_root, ALLOWED_UPLOAD_SUFFIXES, kind="几何")
+
+    @router.post(
+        "/apdl",
+        response_model=UploadAccepted,
+        summary="上传 APDL 文件(直通通道入口/附属)",
+        responses={400: {"model": ErrorBody, "description": "扩展名不允许(INVALID_PARAMS)"}},
+    )
+    async def upload_apdl(
+        file: UploadFile = File(
+            ..., description="APDL 文件,扩展名 .inp/.cdb/.mac/.csv/.txt"
+        ),
+    ) -> UploadAccepted:
+        """multipart 上传 → var/uploads/<id>_<原名>;返回服务端绝对路径供
+        `POST /sim/passthrough` 的 entry_file / extra_files 引用(白名单只收
+        MAPDL 文本类输入,可执行/二进制格式拒绝)。"""
+        return await _accept_upload(file, uploads_root, APDL_UPLOAD_SUFFIXES, kind="APDL")
 
     return router
+
+
+async def _accept_upload(
+    upload: UploadFile,
+    uploads_root: Path,
+    allowed_suffixes: frozenset[str],
+    *,
+    kind: str,
+) -> UploadAccepted:
+    """上传落盘共用管线:消毒文件名 → 后缀白名单 → <token>_<原名> 写入上传目录。"""
+    original_name = Path(upload.filename or "").name  # 消毒:去掉任何路径部分
+    suffix = Path(original_name).suffix.lower()
+    if not original_name or suffix not in allowed_suffixes:
+        shown = upload.filename or "(未提供文件名)"
+        raise ApiError(
+            400, "INVALID_PARAMS",
+            f"不支持的文件 '{shown}';允许的扩展名: {sorted(allowed_suffixes)}",
+        )
+    target = uploads_root / f"{secrets.token_urlsafe(UPLOAD_ID_TOKEN_BYTES)}_{original_name}"
+    size_bytes = await _save_upload(upload, target)
+    logger.info("%s上传: %s(%d 字节)", kind, target, size_bytes)
+    return UploadAccepted(path=str(target.resolve()), size_bytes=size_bytes)
 
 
 async def _save_upload(upload: UploadFile, target: Path) -> int:

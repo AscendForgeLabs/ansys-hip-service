@@ -1,4 +1,4 @@
-"""lead 集成测试 — 真实内核接线 / 12 方法执行器全命中 / calibrate 默认曲线注入 / 工件列表端点.
+"""lead 集成测试 — 真实内核接线 / 13 方法执行器全命中 / calibrate 默认曲线注入 / 工件列表端点.
 
 与 test_api_core.py(假内核全生命周期)互补:
   - 这里优先走**真实** resolve_executor 与真实快速内核(densification /
@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
-# 注册表 ↔ 内核契约:12 个方法全部能解析到真实执行器
+# 注册表 ↔ 内核契约:13 个方法全部能解析到真实执行器
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", sorted(registry.REGISTRY))
@@ -44,8 +44,8 @@ def test_every_method_resolves_real_executor(name: str) -> None:
     assert executor.__name__ == "run_" + name.replace("-", "_")
 
 
-def test_registry_covers_exactly_twelve_methods() -> None:
-    assert len(registry.REGISTRY) == 12
+def test_registry_covers_exactly_thirteen_methods() -> None:
+    assert len(registry.REGISTRY) == 13
 
 
 def test_full3d_hip_phase1_tag_is_solid45() -> None:
@@ -240,7 +240,7 @@ def test_real_compensate_end_to_end_in_worker_thread(
 
 
 # ---------------------------------------------------------------------------
-# 类型化提交路由(REGISTRY 生成 × 12)— openapi 形态 / 管线等价 / 合并语义
+# 类型化提交路由(12 个 REGISTRY 循环生成 + passthrough 手写)— openapi 形态 / 管线等价 / 合并语义
 # ---------------------------------------------------------------------------
 
 TYPED_METHODS = sorted(registry.REGISTRY)

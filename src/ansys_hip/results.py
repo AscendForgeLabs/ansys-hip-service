@@ -1,10 +1,12 @@
-"""MAPDL 结果提取 — job.out 错误行、summary.csv / series.csv 解析。
+"""MAPDL 结果提取 — job.out 错误行、summary.csv / series.csv / results.csv 解析。
 
 文件名约定(全服务统一,apdl 模板与 kernels/fem 按此写出/读回):
     job.out      MAPDL 批处理输出(runner 经 -o 指定)
     summary.csv  两列 key,value;模板 *VWRITE 写出的终态摘要
     series.csv   三列 time_s,probe,value,无表头;probe 为 1 起始的探针序号,
                  模板按探针分块顺序追加(行序不影响解析)
+    results.csv  两列标签,数值(可选);直通通道上游 inp 自写的关键结果,
+                 标签沿用 summary.csv 短标签约定(≤8 字符)
 
 解析均为纯文本处理,可独立单测,不依赖 MAPDL。
 """
@@ -17,6 +19,7 @@ from pathlib import Path
 OUT_FILENAME = "job.out"
 SUMMARY_FILENAME = "summary.csv"
 SERIES_FILENAME = "series.csv"
+RESULTS_FILENAME = "results.csv"
 
 # MAPDL 输出中的错误行特征(job.out 中同时用于 CONVERGENCE_FAILED 诊断)
 ERROR_LINE_KEYWORDS: tuple[str, ...] = ("ERROR", "FATAL")
@@ -95,3 +98,27 @@ def parse_series_csv(job_dir: Path) -> list[dict]:
         rows.append({"time_s": time_s, "probe": fields[1], "value": value})
     rows.sort(key=lambda row: (row["time_s"], row["probe"]))
     return rows
+
+
+def parse_results_csv(job_dir: Path) -> dict[str, float] | None:
+    """读直通通道的 results.csv(标签,数值 两列)→ {标签: 数值}。
+
+    可选契约:文件缺失返回 None(由调用方决定结果 dict 是否带 values);
+    撕裂容忍:与 summary.csv 同风格 — 表头行/字段数不对/数值不可解析的行
+    一律跳过,不抛异常(写出与读取可能并发,坏行只丢该行)。
+    """
+    path = Path(job_dir) / RESULTS_FILENAME
+    if not path.is_file():
+        return None
+    values: dict[str, float] = {}
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        fields = [field.strip() for field in raw.split(",")]
+        if len(fields) != 2 or not fields[0]:
+            continue
+        if fields[0].lower() == "key":  # 容错:跳过可能的表头行
+            continue
+        try:
+            values[fields[0]] = float(fields[1])
+        except ValueError:
+            continue
+    return values
