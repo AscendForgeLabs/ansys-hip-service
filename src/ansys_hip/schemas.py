@@ -21,10 +21,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # ---------------------------------------------------------------------------
 
 class Fidelity(str, Enum):
-    """结果保真度:smoke = 真实几何+占位本构的冒烟结果(阶段 2 升级,API 不变)。"""
+    """结果保真度:passthrough = 忠实转发(服务不背书物理内容,内容由
+    上游 .inp 作者负责);smoke = 占位本构的冒烟结果(历史类型化方法口径)。"""
 
     REAL = "real"
     SMOKE = "smoke"
+    PASSTHROUGH = "passthrough"
 
 
 class JobStatusEnum(str, Enum):
@@ -202,7 +204,9 @@ class SimAccepted(BaseModel):
     method: str = Field(..., description="方法名", examples=["passthrough"])
     status: JobStatusEnum = Field(default=JobStatusEnum.PENDING, description="受理后固定为 pending")
     fidelity: Fidelity | None = Field(
-        default=None, description="方法标称保真度:real=真实内核 / smoke=占位本构冒烟"
+        default=None,
+        description="方法标称保真度:passthrough=忠实转发(服务不背书物理内容) / "
+                    "real=真实内核 / smoke=占位本构冒烟(历史口径)",
     )
     status_url: str = Field(..., description="轮询地址(GET /jobs/{id})", examples=["/jobs/9d2f..."])
 
@@ -234,7 +238,11 @@ class JobState(BaseModel):
     method: str = Field(..., description="方法名")
     part: str | None = Field(default=None, description="兼容保留字段:恒为 None(零件配置级已随类型化方法移除)")
     status: JobStatusEnum = Field(..., description="状态机:pending → running → succeeded / failed / cancelled")
-    fidelity: Fidelity | None = Field(default=None, description="结果保真度:real=真实内核 / smoke=占位本构冒烟")
+    fidelity: Fidelity | None = Field(
+        default=None,
+        description="结果保真度:passthrough=忠实转发(服务不背书物理内容) / "
+                    "real=真实内核 / smoke=占位本构冒烟(历史口径)",
+    )
     created_at: str = Field(..., description="受理时刻(ISO 8601)")
     started_at: str | None = Field(default=None, description="开始执行时刻;排队中为 None")
     finished_at: str | None = Field(default=None, description="结束时刻;未结束为 None")

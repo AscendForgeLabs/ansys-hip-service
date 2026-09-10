@@ -67,6 +67,8 @@ SERVICE_DESCRIPTION = (
 APDL_UPLOAD_SUFFIXES = frozenset({".inp", ".cdb", ".mac", ".csv", ".txt"})
 UPLOAD_ID_TOKEN_BYTES = 6
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+# 单文件上传字节上限(防未鉴权磁盘填充;.cdb 大网格留足余量)
+MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 LOG_TAIL_MAX_LINES = 10_000
 ARTIFACT_FORBIDDEN_PATTERNS = ("/", "\\", "..")
 
@@ -384,6 +386,15 @@ def _validate_passthrough_uploads(params: PassthroughParams, settings: Settings)
                 400, "INVALID_PARAMS",
                 f"{label} 必须位于上传目录内(先经 POST /uploads/apdl 上传): {path_text}",
             )
+    # 声明输出与输入同名会被复制进根部的输入"自我满足",缺件检查被短路
+    # (MAPDL 零产出也算 succeeded)→ 显式拒绝
+    input_names = {Path(path_text).name for _, path_text in labeled}
+    overlapped = sorted(input_names.intersection(params.declared_outputs))
+    if overlapped:
+        raise ApiError(
+            400, "INVALID_PARAMS",
+            f"declared_outputs 不得与入口/附属文件同名(否则零产出也会通过检查): {overlapped}",
+        )
 
 
 def _validation_summary(exc: ValidationError) -> str:
@@ -548,7 +559,11 @@ def _uploads_router(settings: Settings) -> APIRouter:
         "/apdl",
         response_model=UploadAccepted,
         summary="上传 APDL 文件(直通通道入口/附属)",
-        responses={400: {"model": ErrorBody, "description": "扩展名不允许(INVALID_PARAMS)"}},
+        responses={
+            400: {"model": ErrorBody, "description": "扩展名不允许/文件名非法(INVALID_PARAMS)"},
+            403: {"model": ErrorBody, "description": "直通通道未开启(PASSTHROUGH_DISABLED)"},
+            413: {"model": ErrorBody, "description": "超过单文件上传上限(PAYLOAD_TOO_LARGE)"},
+        },
     )
     async def upload_apdl(
         file: UploadFile = File(
@@ -557,7 +572,14 @@ def _uploads_router(settings: Settings) -> APIRouter:
     ) -> UploadAccepted:
         """multipart 上传 → var/uploads/<id>_<原名>;返回服务端绝对路径供
         `POST /sim/passthrough` 的 entry_file / extra_files 引用(白名单只收
-        MAPDL 文本类输入,可执行/二进制格式拒绝)。"""
+        MAPDL 文本类输入,可执行/二进制格式拒绝)。与提交端点同受
+        passthrough 开关门控(关闭时 403,不留旁路上传面)。"""
+        if not settings.passthrough.enabled:
+            raise ApiError(
+                403, "PASSTHROUGH_DISABLED",
+                "直通通道未开启,上传端点一并拒绝"
+                "(config/service.yaml passthrough.enabled=false)",
+            )
         return await _accept_upload(file, uploads_root, APDL_UPLOAD_SUFFIXES, kind="APDL")
 
     return router
@@ -573,7 +595,9 @@ async def _accept_upload(
     """上传落盘共用管线:消毒文件名 → 后缀白名单 → <token>_<原名> 写入上传目录。"""
     original_name = Path(upload.filename or "").name  # 消毒:去掉任何路径部分
     suffix = Path(original_name).suffix.lower()
-    if not original_name or suffix not in allowed_suffixes:
+    # 不可打印字符(如 NUL)过白名单后会让 open() 抛 ValueError → 500,在此先拒
+    is_printable = original_name and all(c.isprintable() for c in original_name)
+    if not is_printable or suffix not in allowed_suffixes:
         shown = upload.filename or "(未提供文件名)"
         raise ApiError(
             400, "INVALID_PARAMS",
@@ -586,15 +610,26 @@ async def _accept_upload(
 
 
 async def _save_upload(upload: UploadFile, target: Path) -> int:
-    """分块写出上传内容并关闭句柄;返回字节数。"""
+    """分块写出上传内容并关闭句柄;超上限中断并清掉半写文件,返回字节数。"""
     size_bytes = 0
+    oversize = False
     try:
         with target.open("wb") as out:
             while chunk := await upload.read(UPLOAD_CHUNK_BYTES):
                 size_bytes += len(chunk)
+                if size_bytes > MAX_UPLOAD_BYTES:
+                    oversize = True
+                    break
                 out.write(chunk)
     finally:
         await upload.close()
+        if oversize:
+            target.unlink(missing_ok=True)  # 半写文件不留守卫磁盘
+    if oversize:
+        raise ApiError(
+            413, "PAYLOAD_TOO_LARGE",
+            f"上传超过单文件上限 {MAX_UPLOAD_BYTES} 字节: '{target.name}'",
+        )
     return size_bytes
 
 

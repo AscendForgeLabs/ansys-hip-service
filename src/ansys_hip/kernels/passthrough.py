@@ -6,8 +6,9 @@
 
 发布面(全部裸文件名,复制进 artifacts/ 供下载):入口文件、job.out
 (无条件,失败作业也留排查证据)、results.csv(可选结构化结果,存在才发布)、
-declared_outputs;声明输出缺失 → KernelError(ARTIFACT_NOT_FOUND)在
-发布之后抛出 — 存在的产出与 job.out 已可下载。
+progress.csv(阶段进度侧车,存在才发布)、declared_outputs;声明输出缺失 →
+KernelError(ARTIFACT_NOT_FOUND)在发布之后抛出 — 存在的产出与 job.out 已可下载。
+MAPDL 执行失败(runner 抛 KernelError)同样先发布入口与 job.out 再上抛。
 
 结果 dict 契约:
     {fidelity: "passthrough", artifacts[], returncode, elapsed_s, values?}
@@ -22,7 +23,12 @@ import time
 from pathlib import Path
 
 from ..registry import KernelError
-from ..results import OUT_FILENAME, RESULTS_FILENAME, parse_results_csv
+from ..results import (
+    OUT_FILENAME,
+    PROGRESS_FILENAME,
+    RESULTS_FILENAME,
+    parse_results_csv,
+)
 from ..runner import run_mapdl
 from ..schemas import RESERVED_JOB_DIR_NAMES, PassthroughParams, RunContext
 from . import publish_artifacts
@@ -33,19 +39,26 @@ def run_passthrough(params: PassthroughParams, ctx: RunContext) -> dict:
     started = time.monotonic()
     entry_dest, _extra_dests = _stage_inputs(params, ctx.job_dir)
     kernel_ctx = _with_clamped_timeout(ctx, params.timeout_s)
-    outcome = run_mapdl(
-        entry_dest,
-        ctx.job_dir,
-        kernel_ctx,
-        ctx.job_dir.name,       # 作业名约定与 fem 内核一致(= job_id)
-        required_outputs=None,  # 产出由 declared_outputs 判定,不检查 summary.csv
-    )
+    try:
+        outcome = run_mapdl(
+            entry_dest,
+            ctx.job_dir,
+            kernel_ctx,
+            ctx.job_dir.name,       # 作业名(= job_id,runner 进程表键;-j hipjob 文件名前缀)
+            required_outputs=None,  # 产出由 declared_outputs 判定,不检查 summary.csv
+        )
+    except KernelError:
+        # 求解失败也保排查证据:入口与 job.out 无条件发布后再上抛
+        publish_artifacts(ctx, [entry_dest.name, OUT_FILENAME])
+        raise
 
     values = parse_results_csv(ctx.job_dir)
-    # 保序去重:results.csv 可能同时出现在可选结果与声明清单中
+    # 保序去重:results.csv/progress.csv 可能同时出现在可选项与声明清单中
+    # (progress.csv 虽是保留名不可声明,仍防御性去重)
     candidates = list(dict.fromkeys([
         entry_dest.name,
         OUT_FILENAME,
+        PROGRESS_FILENAME,
         *([RESULTS_FILENAME] if values is not None else []),
         *params.declared_outputs,
     ]))

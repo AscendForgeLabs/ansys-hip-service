@@ -46,7 +46,7 @@ class MethodSpec:
     name: str
     group: Group
     status: Literal["available", "experimental", "planned"]
-    fidelity: Literal["real", "smoke"]
+    fidelity: Literal["real", "smoke", "passthrough"]
     summary: str                       # 一句话用途(HIPForm 侧据此选方法)
     returns: str                       # 结果 JSON 形态简述
     typical_runtime: str
@@ -82,7 +82,7 @@ REGISTRY: dict[str, MethodSpec] = {
         name="passthrough",
         group="passthrough",
         status="experimental",
-        fidelity="real",   # 注册表口径须为 real/smoke(queue.Fidelity 枚举);实际保真度由内核结果 dict 的 fidelity="passthrough" 表达
+        fidelity="passthrough",   # 忠实转发:服务不背书物理内容(202/状态/结果三处口径一致)
         summary="直通通道:上游自带 APDL 输入(.inp/.cdb/.mac)直接交 MAPDL 执行,服务只治理作业/队列/超时/工件(需 passthrough.enabled=true)",
         returns="{artifacts[], returncode, elapsed_s, values?}(values 仅当入口写出 results.csv)",
         typical_runtime="取决于入口输入(受 ansys.job_timeout_s 或 timeout_s 约束)",

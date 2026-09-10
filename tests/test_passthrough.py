@@ -11,7 +11,10 @@ tests/test_runner.py 钉住,此处补显式清单语义)、注册表 passthrough
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +22,13 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from ansys_hip import api as api_module
 from ansys_hip import registry
 from ansys_hip.api import ApiError, _submit, create_app
 from ansys_hip.kernels.passthrough import run_passthrough
+from ansys_hip.queue import _sweep_expired_uploads
 from ansys_hip.registry import KernelError
-from ansys_hip.results import RESULTS_FILENAME, parse_results_csv
+from ansys_hip.results import PROGRESS_FILENAME, RESULTS_FILENAME, parse_results_csv
 from ansys_hip.runner import run_mapdl
 from ansys_hip.schemas import PassthroughParams, RunContext
 from ansys_hip.settings import PassthroughConfig, Settings, load_settings
@@ -126,31 +131,90 @@ def test_startup_silent_when_passthrough_disabled(settings_factory, caplog) -> N
 
 @pytest.mark.parametrize("suffix", [".inp", ".cdb", ".mac", ".csv", ".txt"])
 def test_upload_apdl_accepts_whitelisted_suffixes(
-    client: TestClient, settings: Settings, suffix: str
+    settings_factory, suffix: str
 ) -> None:
     """后缀白名单五类全收;响应复用 UploadAccepted,落盘进 uploads 根。"""
-    payload = b"/PREP7\nSOLVE\n"
-    response = client.post(
-        "/uploads/apdl",
-        files={"file": (f"job{suffix}", payload, "application/octet-stream")},
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["path"].endswith(f"_job{suffix}")
-    assert body["size_bytes"] == len(payload)
-    assert Path(body["path"]).parent == settings.uploads_root
-    assert Path(body["path"]).is_file()
-
-
-def test_upload_apdl_rejects_geometry_and_unknown_suffixes(client: TestClient) -> None:
-    """几何/未知后缀在 APDL 通道拒绝(直通通道只收 MAPDL 文本类输入)。"""
-    for filename in ("m.step", "solver.exe", "noext"):
+    settings = enabled_settings(settings_factory)
+    with TestClient(create_app(settings)) as client:
+        payload = b"/PREP7\nSOLVE\n"
         response = client.post(
             "/uploads/apdl",
-            files={"file": (filename, b"x", "application/octet-stream")},
+            files={"file": (f"job{suffix}", payload, "application/octet-stream")},
         )
-        assert response.status_code == 400, filename
-        assert response.json()["code"] == "INVALID_PARAMS"
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["path"].endswith(f"_job{suffix}")
+        assert body["size_bytes"] == len(payload)
+        assert Path(body["path"]).parent == settings.uploads_root
+        assert Path(body["path"]).is_file()
+
+
+def test_upload_apdl_rejected_when_passthrough_disabled(client: TestClient) -> None:
+    """开关关闭:上传与提交同受门控(403 PASSTHROUGH_DISABLED,不留旁路上传面)。"""
+    response = client.post(
+        "/uploads/apdl",
+        files={"file": ("job.inp", b"/PREP7\n", "application/octet-stream")},
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["code"] == "PASSTHROUGH_DISABLED"
+
+
+def test_upload_apdl_rejects_geometry_and_unknown_suffixes(settings_factory) -> None:
+    """几何/未知后缀在 APDL 通道拒绝(直通通道只收 MAPDL 文本类输入)。"""
+    with TestClient(create_app(enabled_settings(settings_factory))) as client:
+        for filename in ("m.step", "solver.exe", "noext"):
+            response = client.post(
+                "/uploads/apdl",
+                files={"file": (filename, b"x", "application/octet-stream")},
+            )
+            assert response.status_code == 400, filename
+            assert response.json()["code"] == "INVALID_PARAMS"
+
+
+def test_upload_apdl_rejects_oversize(settings_factory, monkeypatch) -> None:
+    """超过单文件上限 → 413 PAYLOAD_TOO_LARGE;半写文件即清,不留守卫磁盘。"""
+    monkeypatch.setattr(api_module, "MAX_UPLOAD_BYTES", 8)
+    settings = enabled_settings(settings_factory)
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/uploads/apdl",
+            files={"file": ("big.inp", b"x" * 64, "application/octet-stream")},
+        )
+        assert response.status_code == 413, response.text
+        assert response.json()["code"] == "PAYLOAD_TOO_LARGE"
+        assert not list(settings.uploads_root.glob("*_big.inp"))
+
+
+def test_accept_upload_rejects_control_characters_in_filename(tmp_path: Path) -> None:
+    """文件名含 NUL 等控制字符 → 400 而非落盘时 ValueError → 500。
+
+    直调 _accept_upload(HTTP 头本身不允许控制字符,此路仅 ASGI 层异常构造可达)。
+    """
+    class _FakeUpload:  # 最小鸭子类型:校验只读 filename,不触文件句柄
+        filename = "evil\x00.inp"
+
+    with pytest.raises(ApiError) as excinfo:
+        asyncio.run(
+            api_module._accept_upload(
+                _FakeUpload(), tmp_path, api_module.APDL_UPLOAD_SUFFIXES, kind="APDL"
+            )
+        )
+    assert excinfo.value.status_code == 400
+
+
+def test_sweep_expired_uploads_removes_only_stale(tmp_path: Path) -> None:
+    """超期上传按 mtime 清扫;新文件保留;目录缺失静默返回 0。"""
+    stale = tmp_path / "old_job.inp"
+    fresh = tmp_path / "new_job.inp"
+    stale.write_text("x", encoding="utf-8")
+    fresh.write_text("x", encoding="utf-8")
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=4)).timestamp()
+    os.utime(stale, (old_ts, old_ts))
+
+    assert _sweep_expired_uploads(tmp_path, retention_days=3) == 1
+    assert not stale.exists()
+    assert fresh.is_file()
+    assert _sweep_expired_uploads(tmp_path / "missing", retention_days=3) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +249,22 @@ def test_declared_outputs_capped_at_64(settings_factory, fake_executors) -> None
         )
     assert response.status_code == 400
     assert response.json()["code"] == "INVALID_PARAMS"
+
+
+def test_declared_outputs_overlap_with_inputs_rejected(settings_factory) -> None:
+    """declared 与入口的服务端 basename 同名 → 400(输入复制进根部会自我满足
+    缺件检查,零产出也算成功;上传名带 token 前缀,按落盘名判)。"""
+    with TestClient(create_app(enabled_settings(settings_factory))) as client:
+        entry = upload_apdl(client, "demo.inp")
+        basename = Path(entry).name
+        response = _post_passthrough(
+            client,
+            {"entry_file": entry, "declared_outputs": [basename]},
+        )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "INVALID_PARAMS"
+    assert basename in body["message"]
 
 
 def test_declared_outputs_deduplicated_preserving_order(
@@ -505,7 +585,7 @@ def _kernel_params(
 
 def test_run_passthrough_success_publishes_and_parses(tmp_path: Path) -> None:
     """成功路径:entry+extra 原名复制进 job_dir 根 → 执行 → 发布
-    (entry/job.out/results.csv/声明产出)→ values 解析进结果 dict。"""
+    (entry/job.out/progress.csv/results.csv/声明产出)→ values 解析进结果 dict。"""
     job_dir = _make_job_dir(tmp_path)
     source_dir = tmp_path / "uploads"
     source_dir.mkdir()
@@ -519,6 +599,7 @@ def test_run_passthrough_success_publishes_and_parses(tmp_path: Path) -> None:
         'echo "MAPDL STRUCTURAL VERSION 22.1" > "$out"\n'
         'echo "SOLUTION IS DONE" >> "$out"\n'
         "printf 'key,value\\nfinal_den,0.97\\nmax_sig,120.5\\n' > results.csv\n"
+        "printf 'MESH,0.0\\nSEG_P10,600.0\\n' > progress.csv\n"
         "touch final.cdb\n",
     )
 
@@ -534,7 +615,7 @@ def test_run_passthrough_success_publishes_and_parses(tmp_path: Path) -> None:
     assert result["values"] == {"final_den": pytest.approx(0.97),
                                 "max_sig": pytest.approx(120.5)}
     assert set(result["artifacts"]) == {
-        "tok_job.inp", "job.out", RESULTS_FILENAME, "final.cdb",
+        "tok_job.inp", "job.out", PROGRESS_FILENAME, RESULTS_FILENAME, "final.cdb",
     }
     # MAPDL cwd=job_dir:entry/extra 按原名复制进根部,相对引用自然解析
     assert (job_dir / "tok_job.inp").is_file()
@@ -542,6 +623,28 @@ def test_run_passthrough_success_publishes_and_parses(tmp_path: Path) -> None:
     # 发布 = 复制进 artifacts/ 供下载端点服务
     for name in result["artifacts"]:
         assert (job_dir / "artifacts" / name).is_file(), name
+
+
+def test_run_passthrough_failure_still_publishes_job_out(tmp_path: Path) -> None:
+    """MAPDL 非零退出 → CONVERGENCE_FAILED;入口与 job.out 仍发布供上游排查。"""
+    job_dir = _make_job_dir(tmp_path)
+    entry = tmp_path / "fail.inp"
+    entry.write_text("/PREP7\n", encoding="utf-8")
+    bin_path = tmp_path / "ansys_fail"
+    _make_fake_ansys(
+        bin_path,
+        'echo " *** ERROR *** nonlinear convergence failed" > "$out"\nexit 1\n',
+    )
+
+    with pytest.raises(KernelError) as excinfo:
+        run_passthrough(
+            _kernel_params(entry, ["out.csv"]), _kernel_ctx(job_dir, bin_path)
+        )
+
+    assert excinfo.value.code == "CONVERGENCE_FAILED"
+    artifacts_dir = job_dir / "artifacts"
+    assert (artifacts_dir / "job.out").is_file()
+    assert (artifacts_dir / "fail.inp").is_file()
 
 
 def test_run_passthrough_without_results_csv_omits_values(tmp_path: Path) -> None:

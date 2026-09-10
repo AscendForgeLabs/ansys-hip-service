@@ -6,7 +6,7 @@
   resolved-params.json、result.json(成功后)、artifacts/(内核工件)、job.log(状态事件);
 - 异常映射:KernelError→其 code/message;超时→TIMEOUT;其他 Exception→INTERNAL;
 - 取消:pending 直接置 cancelled;running 先防御性调用 ansys_hip.runner.cancel_job
-  (T4 提供,未就绪时跳过)再放弃等待(内核线程随 MAPDL 终止自行退出);
+  (懒加载,runner 未就绪时跳过)再放弃等待(内核线程随 MAPDL 终止自行退出);
 - 启动时:上次进程遗留的 pending/running 作业标记为 failed,并清扫超过保留期的目录。
 """
 
@@ -82,7 +82,9 @@ class JobQueue:
         """恢复遗留作业、清扫超期目录,并启动 max_concurrent 个工作协程。"""
         self._stopping = False
         self._revive_interrupted_jobs()
-        _sweep_expired_jobs(self._jobs_root, self._settings.storage.retention_days)
+        retention_days = self._settings.storage.retention_days
+        _sweep_expired_jobs(self._jobs_root, retention_days)
+        _sweep_expired_uploads(self._settings.uploads_root, retention_days)
         worker_count = max(1, self._settings.queue.max_concurrent)
         self._workers = [
             asyncio.create_task(self._worker(), name=f"hip-queue-worker-{index}")
@@ -149,9 +151,10 @@ class JobQueue:
     def state(self, record: JobRecord) -> JobState:
         """JobState 快照(含标准子资源 URL)。
 
-        stages 为读时投影:每次组装响应时解析 job_dir 根的 progress.csv 侧车,
-        无后台轮询协程、不写 state.json、无状态迁移 — 文件不存在(尚无侧车,
-        如全部既有方法)自然得 None;终态后文件在盘上保留,快照即末帧。
+        stages 为读时投影:GET 组装响应时解析 job_dir 根的 progress.csv 侧车,
+        无后台轮询协程、无状态迁移(状态迁移落盘 state.json 时会经本方法附带
+        一份当时的 stages 快照,仅归档,无人消费)— 文件不存在(尚无侧车)
+        自然得 None;终态后文件在盘上保留,快照即末帧。
         """
         return JobState(
             id=record.id,
@@ -323,7 +326,7 @@ class JobQueue:
         _write_json(record.job_dir / STATE_FILENAME, payload)
 
     def _runner_cancel(self, job_id: str) -> None:
-        """防御性终止 MAPDL 进程(ansys_hip.runner 由 T4 提供,未就绪时跳过)。"""
+        """防御性终止 MAPDL 进程(懒加载 runner.cancel_job,未就绪时跳过)。"""
         job_dir = self._jobs_root / job_id
         try:
             from .runner import cancel_job  # noqa: PLC0415 — 懒加载,runner 未就绪不阻断
@@ -356,6 +359,26 @@ class JobQueue:
 # ---------------------------------------------------------------------------
 # 模块级纯工具
 # ---------------------------------------------------------------------------
+
+def _sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
+    """删除超过保留期的上传文件(按修改时间;启动时内存无在册作业,无引用冲突)。"""
+    if not uploads_root.is_dir():
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    removed = 0
+    for upload in sorted(path for path in uploads_root.iterdir() if path.is_file()):
+        try:
+            modified_at = datetime.fromtimestamp(upload.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if modified_at >= cutoff:
+            continue
+        upload.unlink(missing_ok=True)
+        removed += 1
+    if removed:
+        logger.info("已清扫超期上传 %d 个(保留 %d 天)", removed, retention_days)
+    return removed
+
 
 def _sweep_expired_jobs(jobs_root: Path, retention_days: int) -> int:
     """删除终态且 finished_at 超过保留期的作业目录;返回删除数。"""
