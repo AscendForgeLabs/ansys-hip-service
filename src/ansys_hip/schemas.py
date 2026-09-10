@@ -118,10 +118,12 @@ class ErrorBody(BaseModel):
 class MethodParamsBase(BaseModel):
     """方法参数模型共享基类:未知顶层键一律拒绝(400 INVALID_PARAMS)。
 
-    与泛化路由的手工 unknown-key 检查双保险;类型化路由(POST /sim/{name})
-    靠它让 pydantic 直接挡掉拼错的字段名,不被静默吞掉。
-    仅方法顶层参数模型继承 — 嵌套构件(Cycle/GeometryRef 等)保持默认,
-    两套入口行为完全一致。
+    类型化路由(POST /sim/{name})靠它在请求体解析层直接挡掉拼错的字段名,
+    不被静默吞掉;泛化路由 _resolve_params 的手工 unknown-key 检查保留为防御
+    (已知方法流量已被类型化路由截获,该分支生产不可达,直调单测钉住)。
+    嵌套构件(Cycle/GeometryRef 等)不继承、保持默认(未知子键忽略);
+    例外:DensificationParams 亦作为 process-window / sensitivity 的 base
+    嵌套引用,forbid 随继承带入 — base 内未知键同样 400。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -214,7 +216,8 @@ class AxisymThermalParams(MethodParamsBase):
     numerics: Numerics = Field(default_factory=Numerics)
     probe_points: list[tuple[float, float]] = Field(
         default=[(0.0, 0.5), (0.0, 0.0)],
-        description="探针点 (r, z) 归一化坐标 → 输出 T-t 曲线(缺省芯部+底面);≤99 个(探针号受 APDL 写出宽度限制)",
+        max_length=99,
+        description="探针点 (r, z) 归一化坐标 → 输出 T-t 曲线(缺省芯部+底面);≤99 个(探针号受 APDL 写出宽度限制,超限在校验层拒绝而非静默截断撞键)",
     )
 
 

@@ -16,8 +16,9 @@ uv run uvicorn ansys_hip.main:app --host 0.0.0.0 --port 8010
 ## 调用模式
 
 提交作业:12 个方法各有**类型化端点** `POST /sim/{name}`(由 REGISTRY 循环生成,Swagger
-提供字段级表单与校验提示);泛化 `POST /sim/{method}` 仍运行时兼容(HIPForm 零改动,
-不在 Swagger 展示)。两套入口共用同一条合并/校验/入队管线,结果一致。
+提供字段级表单与校验提示);泛化 `POST /sim/{method}` 保留兜底(仅未知方法可达,
+已知方法的既有调用由类型化端点等价服务 — HIPForm 零改动,不在 Swagger 展示)。
+两套入口共用同一条合并/校验/入队管线,结果一致。
 异步模式:202 受理 → 轮询 `GET /jobs/{id}` → 取结果/工件。
 
 ## 方法一览(12 个,阶段 1 全部上线)

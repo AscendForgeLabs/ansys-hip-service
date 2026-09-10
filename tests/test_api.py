@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ansys_hip import registry
-from ansys_hip.api import _resolve_params, create_app
+from ansys_hip.api import ApiError, _resolve_params, create_app
 from ansys_hip.settings import Settings, load_parts
 
 # 复用 test_api_core 的测试工具(pytest 会把 tests/ 加入 sys.path)
@@ -300,15 +300,18 @@ def test_generic_submit_route_hidden_from_openapi(client: TestClient) -> None:
         ("material-query", {"params": {"material": "20steel", "temperatures_c": [20, 900]}}),
     ],
 )
-def test_typed_route_matches_generic_pipeline(
+def test_typed_route_matches_resolve_params(
     client: TestClient,
     fake_executors,
     settings: Settings,
     name: str,
     payload: dict[str, Any],
 ) -> None:
-    """类型化路由(exclude_unset dump)与泛化管线语义(手拼 dict → _resolve_params)
-    对同一 (part, 内联参数) 产出完全一致的合并结果。"""
+    """类型化路由(exclude_unset dump)与合并层语义(原始 payload dict 直调
+    _resolve_params)对同一 (part, 内联参数) 产出完全一致的合并结果。
+
+    注:泛化路由对已知方法已不可达(类型化路由先注册截获),此处对照的是
+    _resolve_params 直调路径 — 机制上即泛化处理器的请求处理体。"""
     calls: list[Any] = []
 
     def capture(params: Any, ctx: Any) -> dict[str, Any]:
@@ -449,3 +452,63 @@ def test_fallback_route_unknown_method_returns_404(client: TestClient) -> None:
     response = client.post("/sim/no-such-method", json={})
     assert response.status_code == 404
     assert response.json()["code"] == "METHOD_NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# CR 修正钉测:wrapper 顶层 forbid / 嵌套 base forbid / 探针数上限 / 手工检查防御
+# ---------------------------------------------------------------------------
+
+def test_typed_route_wrapper_unknown_top_level_key_rejected(
+    client: TestClient,
+) -> None:
+    """wrapper extra=forbid:顶层键拼错("paramz")不再被静默吞掉 —
+    否则 params 整体丢失,作业以零件/默认参数"成功"跑完,零告警。"""
+    response = client.post(
+        "/sim/densification",
+        json={"paramz": {"initial_relative_density": 0.68}},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "INVALID_PARAMS"
+    assert "paramz" in body["message"]
+
+
+def test_nested_base_unknown_key_rejected(client: TestClient) -> None:
+    """嵌套 base 随继承 forbid:DensificationParams 亦被 process-window /
+    sensitivity 嵌套引用,base 内拼错键 → 400(其余嵌套构件仍忽略未知子键)。"""
+    response = client.post(
+        "/sim/process-window",
+        json={"params": {"base": {"initial_relative_dens": 0.7}}},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "INVALID_PARAMS"
+    assert "initial_relative_dens" in body["message"]
+
+
+def test_probe_points_capped_at_99(client: TestClient) -> None:
+    """探针数 ≤99 是写出契约(series 探针列宽 A2,3 位数探针号被截断撞键)→
+    校验层强制拒绝,不再静默产出高号探针数据丢失的"成功"结果。"""
+    response = client.post(
+        "/sim/axisym-thermal",
+        json={
+            "params": {
+                "profile": {"outer_radius_mm": 50.0, "height_mm": 150.0},
+                "probe_points": [[0.0, 0.5]] * 100,
+            }
+        },
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "INVALID_PARAMS"
+    assert "probe_points" in body["message"]
+
+
+def test_resolve_params_manual_unknown_key_check_pinned(settings: Settings) -> None:
+    """_resolve_params 手工 unknown-key 检查在生产不可达(泛化路由只收未知方法,
+    类型化路由的 params 已过 pydantic forbid)— 直调钉住其语义,防重构无声丢失。"""
+    spec = registry.REGISTRY["densification"]
+    with pytest.raises(ApiError) as exc_info:
+        _resolve_params(spec, settings, None, {"bogus": 1})
+    assert exc_info.value.status_code == 400
+    assert "bogus" in str(exc_info.value.detail)

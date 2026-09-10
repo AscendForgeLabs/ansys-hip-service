@@ -31,7 +31,7 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
-from pydantic import BaseModel, Field, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from . import __version__, registry
 from .queue import ACTIVE_STATUSES, ARTIFACTS_DIRNAME, JobQueue, LOG_FILENAME, RESULT_FILENAME
@@ -392,6 +392,9 @@ def _sim_router(
     for spec in registry.REGISTRY.values():
         request_model = create_model(
             f"{_camel_case(spec.name)}SimRequest",
+            # wrapper 同样 forbid:顶层键拼错(如 "paramz")若被默认 ignore 吞掉,
+            # params 整体丢失 → 作业以零件/默认参数"成功",零告警。
+            __config__=ConfigDict(extra="forbid"),
             part=(str | None, Field(
                 default=None,
                 description="零件配置名(config/parts/<name>.yaml);与 params 可只给其一",
@@ -413,8 +416,9 @@ def _sim_router(
             openapi_extra=_examples_openapi_extra(_TYPED_ROUTE_EXAMPLES.get(spec.name)),
         )(_typed_submit_endpoint(spec, request_model, settings, parts, queue))
 
-    # 泛化兜底(后注册):已知方法已被上面的类型化路由截获,这里只服务未知方法
-    #(404)与 HIPForm 的既有调用形态;运行时行为不变,但不再进 OpenAPI/Swagger。
+    # 泛化兜底(后注册,不在 Swagger 展示):已知方法已被上面的类型化路由截获,
+    # 本处理器实际只对未知方法名可达(404);端点保留是为维持既有 URL 形态 —
+    # HIPForm 对已知方法的调用由类型化端点经同一条 _submit 管线等价服务。
     @router.post(
         "/{method}",
         response_model=SimAccepted,

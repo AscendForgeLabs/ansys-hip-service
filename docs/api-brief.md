@@ -26,7 +26,7 @@ FastAPI / pydantic v2 / numpy / scipy / gmsh / meshio。
 | `/health` | GET | 服务健康:MAPDL 可执行/许可环境/队列深度/版本 |
 | `/sim/methods` | GET | 12 方法自描述(分组/状态/保真度/参数 JSON Schema);**返回裸数组** |
 | `/sim/{name}` | POST | **类型化提交端点**(12 个,REGISTRY 生成,Swagger 按方法组折叠展示):请求体 `{part, params}`,`params` 即该方法参数模型 → 字段级表单、真实示例与 pydantic 提前校验(未知字段直接 400)。**一律 202 受理**(校验顺序见 §6.3) |
-| `/sim/{method}` | POST | 泛化兜底(运行时等价,不在 Swagger 展示):请求体 `{part, params: dict}`,服务既有 HIPForm 调用形态;与类型化端点共用同一条合并/校验/入队管线,结果一致 |
+| `/sim/{method}` | POST | 泛化兜底(不在 Swagger 展示):已知方法已被类型化端点截获,本端点实际只对未知方法名可达(404);保留以维持既有 URL 形态 — 对已知方法的既有调用由类型化端点经同一条合并/校验/入队管线等价服务 |
 | `/jobs/{id}` | GET | 作业状态(pending/running/succeeded/failed/cancelled)+ log/result/artifacts 链接 |
 | `/jobs/{id}/result` | GET | 成功作业的结果 JSON;未完成:pending/running/cancelled → **409 RESULT_NOT_READY**,failed → **409 JOB_FAILED**(body 带原 error 的 code/message) |
 | `/jobs/{id}/artifacts` | GET | **工件集合端点**:返回文件名列表(与 result.json 的 `artifacts` 数组一致);`JobState.artifacts_url` 即指向本端点 |
@@ -107,12 +107,16 @@ FastAPI / pydantic v2 / numpy / scipy / gmsh / meshio。
 
 1. **提交校验顺序**(POST /sim/*,全部通过才 202 受理):
    404 方法 → 503 下线 → 501 未实现 → 404 零件 → 400 参数
-  (类型化端点只匹配已知方法,404 方法分支仅泛化兜底可达);
-2. 内联 `params` 出现未知顶层键 → 400 INVALID_PARAMS(防拼写错误被静默忽略);
+  (类型化端点只匹配已知方法,404 方法分支仅泛化兜底可达;边缘:类型化端点
+   请求体非法且方法同时下线时,FastAPI 请求体校验先于处理器 → 400 先于 503);
+2. 内联 `params` 出现未知顶层键 → 400 INVALID_PARAMS(防拼写错误被静默忽略;
+   嵌套 `base`(process-window / sensitivity)同样拒绝,其余嵌套构件忽略未知子键);
 3. 请求体校验失败统一 **400**(FastAPI 默认 422 已被覆盖);
 4. `GET /sim/methods` 返回**裸数组**(无 `{items: [...]}` 包装);
 5. 作业注册表阶段 1 在**内存**:服务重启后历史作业 `GET /jobs/{id}` → 404;磁盘遗留的
-   pending/running 作业启动时改标 failed(INTERNAL)。
+   pending/running 作业启动时改标 failed(INTERNAL);
+6. 错误 message 文本在类型化 / 泛化两套入口间措辞可能不同(pydantic 直译 vs 手工拼接),
+   code 与 HTTP 状态码一致 — 调用方按 code 匹配,勿匹配 message 文本。
 
 ## 7. curl 示例
 

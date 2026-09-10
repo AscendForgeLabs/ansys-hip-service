@@ -5,7 +5,8 @@
 > 本文是 **12 个仿真方法的字段级参考**:每个方法接受哪些参数、类型、默认值、结果形态。
 > 调用模式、端点总览、错误码见 `docs/api-brief.md`;机器可读真源为
 > `GET /sim/methods`(各方法 `params_schema`)与 Swagger(`/docs`)。
-> 单位约定:**mm / MPa / s / ℃**。所有方法统一走 `POST /sim/{method}`,202 受理 →
+> 单位约定:**mm / MPa / s / ℃**。提交走各方法的类型化端点 `POST /sim/{name}`
+> (泛化 `POST /sim/{method}` 运行时兼容、不在 Swagger 展示),202 受理 →
 > 轮询 `GET /jobs/{id}` → `GET /jobs/{id}/result` 取结果、`/artifacts/{name}` 下工件。
 
 ---
@@ -15,7 +16,8 @@
 1. **三级合并**:`请求内联 params` > `零件配置(part)` > `主配置 defaults`。
    参数几乎全部可选 —— 只给 `{"part": "tc4-demo"}` 即可跑通;内联只写想覆盖的键。
    合并结果写入作业目录 `resolved-params.json`,可追溯。
-2. **内联只收已知顶层键**,拼错 → 400 `INVALID_PARAMS`(防静默吞字段)。
+2. **内联只收已知顶层键**,拼错 → 400 `INVALID_PARAMS`(防静默吞字段;
+   嵌套 `base`(process-window / sensitivity)同样拒绝,其余嵌套构件忽略未知子键)。
 3. **合并粒度**(内联给部分子字段时):
    - `cycle`:`points` 列表**整体替换**,不逐点合并;
    - `mesh` / `materials`(含 `overrides`):**深合并**(内联键覆盖,其余保留);

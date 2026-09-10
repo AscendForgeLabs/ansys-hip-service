@@ -1,6 +1,6 @@
 # 设计方案:REGISTRY 驱动的类型化提交路由(方案 B)
 
-> 状态:已实现(2026-09-10;§4.2 修正:params 字段为可选而非必填,零件全继承提交仍可用)· 涉及 `api.py` / `schemas.py` / `tests/test_api.py`
+> 状态:已实现(2026-09-10;§4.2 修正:params 字段为可选而非必填,零件全继承提交仍可用;同日 CR 修正:wrapper extra=forbid(§4.2)、嵌套 base 随继承 forbid(§4.4)、probe_points ≤99 校验)· 涉及 `api.py` / `schemas.py` / `tests/test_api.py`
 
 ## 1. 背景与动机
 
@@ -69,6 +69,8 @@ create_model(
 ```
 
 - 组件名全局唯一,OpenAPI `components.schemas` 无冲突;
+- wrapper 本身 `extra="forbid"`(CR 修正):顶层键拼错(如 `paramz`)直接 400,
+  防止 params 整体被默认 ignore 静默丢弃(否则作业以零件/默认参数"成功",零告警);
 - 端点 `summary=spec.summary`,`description` 拼接 `returns` / `typical_runtime` /
   `tags`,`tags=[spec.group_label]` → Swagger 里按 4 个方法组折叠,信息密度高于现状;
 - 现有 `openapi_extra` 3 个请求示例迁移:拆到 `densification`(零件全继承 /
@@ -104,7 +106,13 @@ class MethodParamsBase(BaseModel):
 ```
 
 `RequestValidationError` 已有全局 handler → 400 `INVALID_PARAMS`(错误体格式不变)。
-泛化路由的手工检查保留(双保险,两入口行为一致)。
+泛化路由的手工检查保留为防御(已知方法流量已被类型化路由截获,该分支生产不可达,
+直调单测钉住)。
+
+**嵌套 base 的连带收紧(CR 声明)**:`DensificationParams` 亦作为 process-window /
+sensitivity 的 `base` 嵌套引用,forbid 随继承带入 — `base` 内未知键同样 400
+(原为静默忽略,属 desirable break);其余嵌套构件(Cycle/GeometryRef 等)保持
+默认(未知子键忽略)。
 
 ### 4.5 状态码与错误映射(零变化)
 
@@ -119,7 +127,9 @@ class MethodParamsBase(BaseModel):
 
 ## 5. 兼容性声明
 
-- `POST /sim/{method}`(泛化)请求/响应/错误体逐字节不变 —— HIPForm 无感;
+- `POST /sim/{method}`(泛化)对其可达流量(未知方法 → 404)行为不变;已知方法流量
+  由类型化端点经同一条管线服务,响应/错误码一致(错误 message 措辞可能不同,
+  调用方按 code 匹配)—— HIPForm 无感;
 - `GET /sim/methods`、`/jobs/*`、`/parts/*`、`/uploads`、`/health` 不动;
 - 唯一对外可见变化:`/docs` 的 sim 组从 1 个端点变 12 个,`/openapi.json` 变大
   (12 个包装模型 + 12 个参数模型进 components)。
