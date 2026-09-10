@@ -57,7 +57,7 @@ vmax{{ probe.index }} = MAX(vmax{{ probe.index }},vpr{{ probe.index }})
 {% endfor %}
 {% for probe in probes %}
 *VWRITE,tcur,'{{ probe.index }}',vpr{{ probe.index }}
-(E16.8,',',A1,',',E16.8)
+(E16.8,',',A2,',',E16.8)
 {% endfor %}
 /SOLU
 {% endfor %}
@@ -70,9 +70,9 @@ tfinal = {{ segments[-1].t_end|g }}
 *VWRITE,'t_final',tfinal
 (A8,',',E16.8)
 {% for probe in probes %}
-*VWRITE,'tmax_pr{{ probe.index }}',vmax{{ probe.index }}
+*VWRITE,'tmax{{ probe.index }}',vmax{{ probe.index }}
 (A8,',',E16.8)
-*VWRITE,'tfin_pr{{ probe.index }}',vpr{{ probe.index }}
+*VWRITE,'tfin{{ probe.index }}',vpr{{ probe.index }}
 (A8,',',E16.8)
 {% endfor %}
 *CFCLOSE

@@ -65,7 +65,9 @@ PROBE_NAMES_DEFAULT = ("core", "surface")
 SECTION_SAMPLE_COUNT = 11
 CDB_STEM = "capsule_powder"
 # summary.csv APDL 短标签(标签须 ≤8 字符,超长被 MAPDL 字符字面量截断)
-# → API 结果键;模板侧写出的其余短标签(t_final/p_hold/tmax_prN)暂无读回方
+# → API 结果键;模板侧写出的其余标签暂无读回方:
+# t_final/p_hold(axisym-hip / 3d 工艺参数)、tmax{N}/tfin{N}(thermal 逐探针
+# 最高/终态温度,N=探针号须 ≤2 位数,否则 8 字符上限截断撞键)
 SUMMARY_LABELS: dict[str, str] = {
     "displacement_max_mm": "disp_max",
     "von_mises_max_mpa": "vm_max",

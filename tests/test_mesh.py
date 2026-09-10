@@ -23,6 +23,7 @@ from ansys_hip.apdl.material_apdl import (
 )
 from ansys_hip.apdl.render import render, write_input
 from ansys_hip.kernels.fem import (
+    SUMMARY_LABELS,
     _axisym_domain,
     _axisym_zones,
     _elastic_lines,
@@ -34,7 +35,6 @@ from ansys_hip.kernels.fem import (
 )
 from ansys_hip.kernels.materials import load_material
 from ansys_hip.mesh import (
-    TET_FACE_TO_SOLID45,
     exterior_faces_from_cdb,
     mesh_capsule_powder,
     step_bbox,
@@ -215,8 +215,9 @@ class TestExteriorFaces:
         faces = exterior_faces_from_cdb(cdb)
         assert len(faces) > 0
         assert all(1 <= elem <= result["element_count"] for elem, _ in faces)
-        # 载荷面号 = TET_FACE_TO_SOLID45 的值域(四面体面 1-4 → 3/5/2/1)
-        assert all(face in set(TET_FACE_TO_SOLID45.values()) for _, face in faces)
+        # 载荷面号域 = SOLID45 可加载面 {1,2,3,5}:4/6 为退化凝聚面,SFE 加压被
+        # MAPDL 忽略 — 硬编码独立于 TET_FACE_TO_SOLID45,以防常量被改退
+        assert all(face in {1, 2, 3, 5} for _, face in faces)
         # 单元四面共 4 面,外表面必是全部面的严格子集
         total_faces = 4 * result["element_count"]
         assert len(faces) < total_faces
@@ -273,6 +274,12 @@ _TWO_ZONES = [
 ]
 
 
+def _assert_summary_labels(text: str) -> None:
+    """写读钉测:SUMMARY_LABELS(fem 读回侧)的每个标签都须在模板渲染产物中写出。"""
+    for label in SUMMARY_LABELS.values():
+        assert f"*VWRITE,'{label}'," in text
+
+
 class TestTemplateRender:
     def test_axisym_thermal_keywords(self):
         material_blocks = ["\n".join(material_commands(load_material("tc4"), 1, "thermal"))]
@@ -318,6 +325,7 @@ class TestTemplateRender:
         assert "ESORT,ETAB,vmse" in text
         assert "MP,EX,1,110000" in text
         assert "*CFOPEN,summary,csv" in text
+        _assert_summary_labels(text)
 
     def test_axisym_mechanical_keywords(self):
         text = render(
@@ -332,6 +340,7 @@ class TestTemplateRender:
         assert "nsec1 = NODE(0,30,0)" in text
         assert "*GET,ssec1,NODE,nsec1,S,X" in text
         assert "*VWRITE,rcur1,'1',ssec1" in text  # 探针列为字符字面量(I2 会打印 ** )
+        _assert_summary_labels(text)
 
     def test_3d_keywords(self):
         text = render(
@@ -342,16 +351,17 @@ class TestTemplateRender:
             x_min=-30.0,
             y_min=-30.0,
             z_min=0.0,
-            pressure_faces=[(1, 4), (9, 1)],
+            pressure_faces=[(1, 3), (9, 5)],  # 面号取 TET_FACE_TO_SOLID45 值域(真实提取器产出)
             hold_pressure_mpa=120.0,
         )
         assert "/INPUT,capsule_powder,cdb" in text
-        assert "SFE,1,4,PRES,,120" in text
-        assert "SFE,9,1,PRES,,120" in text
+        assert "SFE,1,3,PRES,,120" in text
+        assert "SFE,9,5,PRES,,120" in text
         assert "NSEL,S,LOC,Z,0 $ D,ALL,UZ,0" in text
         assert "NSEL,S,LOC,X,-30 $ D,ALL,UX,0" in text
         assert "NLGEOM,0" in text
         assert "ETABLE,vmse,S,EQV" in text
+        _assert_summary_labels(text)
 
     def test_missing_context_key_raises(self):
         from jinja2 import UndefinedError
