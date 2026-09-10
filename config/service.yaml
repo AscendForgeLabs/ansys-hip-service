@@ -1,5 +1,5 @@
 # ansys-hip-service 主配置(网关级唯一主文件)
-# 覆盖优先级: 请求内联参数 > config/parts/<零件>.yaml > 本文件默认
+# 服务已收敛为 passthrough 单通道:参数只来自请求内联 params(无零件配置级/默认值级)
 # 所有路径均可被同名环境变量覆盖(见 settings.py: HIP_SERVICE_CONFIG / ANSYS_BIN / ANSYSLMD_LICENSE_FILE ...)
 
 server:
@@ -17,29 +17,11 @@ queue:
 
 storage:
   jobs_dir: var/jobs
-  uploads_dir: var/uploads   # POST /uploads 几何文件落盘位置
+  uploads_dir: var/uploads   # POST /uploads/apdl 上传文件落盘位置
   retention_days: 3     # 完成作业保留 3 天后清理
 
-# 全局默认(零件配置/请求可覆盖)
-defaults:
-  cycle:                # 规格: 900℃ / 120 MPa / 保温保压 3 h
-    points:
-      - {time_s: 0,     temperature_c: 20,  pressure_mpa: 0}
-      - {time_s: 3600,  temperature_c: 900, pressure_mpa: 120}
-      - {time_s: 14400, temperature_c: 900, pressure_mpa: 120}
-      - {time_s: 16200, temperature_c: 200, pressure_mpa: 10}
-      - {time_s: 18000, temperature_c: 20,  pressure_mpa: 0}
-  materials:
-    powder: tc4
-    capsule: 20steel
-  mesh:
-    mesh_size_mm: 6.0
-  densification:
-    initial_relative_density: 0.65
-    limiting_relative_density: 0.995
-
 methods:
-  disabled: []          # 例: ["full3d-hip"] 可临时下线某方法
+  disabled: []          # 例: ["passthrough"] 可临时下线方法
 
 # 直通通道(POST /sim/passthrough):上游自带 APDL 输入直接交 MAPDL 执行。
 # 安全前提:开启即暴露任意 APDL 执行面(APDL 可读写文件、起系统命令),
@@ -47,3 +29,4 @@ methods:
 # 可用环境变量 HIP_SERVICE_PASSTHROUGH_ENABLED=true 覆盖。
 passthrough:
   enabled: false
+

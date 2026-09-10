@@ -1,6 +1,8 @@
 """runner 单测 — 假 ansys221(bash 脚本)覆盖成功/失败/许可/超时/取消/缺二进制路径。
 
 一切用例的 ansys_bin 都指向 tmp_path 内生成的脚本,绝不触真 MAPDL。
+另含 results.extract_error_lines 单元测试(自 test_mesh.py 迁入:解析函数
+收敛后仅存 job.out 错误行提取与 results.csv 解析,不再依赖网格/模板)。
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from ansys_hip.registry import KernelError
+from ansys_hip.results import extract_error_lines
 from ansys_hip.runner import cancel_job, interactive_available, run_mapdl
 from ansys_hip.schemas import RunContext
 
@@ -59,13 +62,12 @@ def job_dir(tmp_path: Path) -> Path:
 
 
 def test_success_writes_outputs_and_returns_metrics(job_dir: Path, tmp_path: Path) -> None:
-    # Arrange — 假二进制正常结束并产出 summary.csv
+    # Arrange — 假二进制正常结束(默认 required_outputs=None,不检查产出文件)
     bin_path = tmp_path / "ansys_ok"
     _make_fake_ansys(
         bin_path,
         'echo "MAPDL STRUCTURAL VERSION 22.1" > "$out"\n'
-        'echo "SOLUTION IS DONE" >> "$out"\n'
-        "touch summary.csv",
+        'echo "SOLUTION IS DONE" >> "$out"',
     )
     ctx = _make_ctx(job_dir, bin_path)
 
@@ -76,7 +78,6 @@ def test_success_writes_outputs_and_returns_metrics(job_dir: Path, tmp_path: Pat
     assert result["returncode"] == 0
     assert result["elapsed_s"] >= 0.0
     assert Path(result["out_path"]) == job_dir / "job.out"
-    assert (job_dir / "summary.csv").is_file()
 
 
 def test_error_line_in_out_raises_convergence_failed(job_dir: Path, tmp_path: Path) -> None:
@@ -84,8 +85,7 @@ def test_error_line_in_out_raises_convergence_failed(job_dir: Path, tmp_path: Pa
     bin_path = tmp_path / "ansys_err"
     _make_fake_ansys(
         bin_path,
-        'echo "*** ERROR *** CP = 1 TIME = 0.5 ELEMENT 5 NOT CONVERGED" > "$out"\n'
-        "touch summary.csv",
+        'echo "*** ERROR *** CP = 1 TIME = 0.5 ELEMENT 5 NOT CONVERGED" > "$out"',
     )
     ctx = _make_ctx(job_dir, bin_path)
 
@@ -112,12 +112,11 @@ def test_nonzero_exit_without_error_line_raises_convergence_failed(
 
 
 def test_license_error_line_raises_license_unavailable(job_dir: Path, tmp_path: Path) -> None:
-    # Arrange — 许可失败(且即便 summary 存在也优先判许可)
+    # Arrange — 许可失败(诊断阶梯中许可先于 ERROR 行判定)
     bin_path = tmp_path / "ansys_lic"
     _make_fake_ansys(
         bin_path,
-        'echo "LICENSE MANAGER ERROR -5: checkout failed" > "$out"\n'
-        "touch summary.csv",
+        'echo "LICENSE MANAGER ERROR -5: checkout failed" > "$out"',
     )
     ctx = _make_ctx(job_dir, bin_path)
 
@@ -128,15 +127,25 @@ def test_license_error_line_raises_license_unavailable(job_dir: Path, tmp_path: 
     assert "LICENSE MANAGER ERROR" in excinfo.value.message
 
 
-def test_normal_exit_without_summary_raises_internal(job_dir: Path, tmp_path: Path) -> None:
-    # Arrange — 正常结束但没产出 summary.csv(模板结果写出环节失效)
+def test_default_required_outputs_none_succeeds_without_outputs(
+    job_dir: Path, tmp_path: Path
+) -> None:
+    # Arrange — 正常结束且不产出任何结果文件
     bin_path = tmp_path / "ansys_nosum"
     _make_fake_ansys(bin_path, 'echo "SOLUTION IS DONE" > "$out"')
     ctx = _make_ctx(job_dir, bin_path)
 
-    # Act / Assert
+    # Act / Assert — 默认 required_outputs=None:直通通道由内核按 declared_outputs
+    # 自行判定产出,runner 不再强制 summary.csv(类型化方法契约已随方法库移除)
+    result = run_mapdl(job_dir / "job.inp", job_dir, ctx, "job-default")
+    assert result["returncode"] == 0
+
+    # 显式传清单则恢复缺件 INTERNAL(能力保留,供需要强契约的调用方使用)
     with pytest.raises(KernelError) as excinfo:
-        run_mapdl(job_dir / "job.inp", job_dir, ctx, "job-nosum")
+        run_mapdl(
+            job_dir / "job.inp", job_dir, ctx, "job-explicit",
+            required_outputs=("summary.csv",),
+        )
     assert excinfo.value.code == "INTERNAL"
     assert "summary.csv" in excinfo.value.message
 
@@ -196,3 +205,27 @@ def test_cancel_unknown_job_is_false() -> None:
 def test_interactive_available_returns_bool() -> None:
     # Act / Assert — PyMAPDL 未安装时 False,已安装 True;仅要求不抛异常
     assert isinstance(interactive_available(), bool)
+
+
+# ---------------------------------------------------------------------------
+# results.extract_error_lines 单元(自 test_mesh.py 迁入)
+# ---------------------------------------------------------------------------
+
+def test_extract_error_lines() -> None:
+    out = "\n".join([
+        "   *** ERROR ***  CP = 1.2",
+        "normal line",
+        "*** FATAL *** terminated",
+        " This could invalidate error estimation.",  # 警告散文中的小写 error,不是错误行
+        "NUMBER OF ERROR MESSAGES ENCOUNTERED= 0",  # 结尾统计行,排除
+        "The number of ERROR and WARNING messages exceeds 200.",  # 警告超量提示,排除
+    ])
+    lines = extract_error_lines(out)
+    assert len(lines) == 2
+    assert lines[0].startswith("*** ERROR ***")
+    assert lines[1].startswith("*** FATAL ***")
+
+
+def test_extract_error_lines_capped() -> None:
+    out = "\n".join(f"*** ERROR *** {i}" for i in range(60))
+    assert len(extract_error_lines(out)) == 40

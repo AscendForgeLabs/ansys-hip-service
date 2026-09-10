@@ -1,10 +1,11 @@
 """passthrough 直通通道测试 — 配置开关 / APDL 上传 / 参数校验 / 内核 / 路由注册.
 
 覆盖计划 Step 1→4:开关(settings + service.yaml + /health + 启动告警)、
-POST /uploads/apdl、PassthroughParams 边界(保留名/裸文件名/去重/上限)、
-kernels/passthrough.py(复制→runner→发布→results.csv)、runner required_outputs
-参数化(默认行为不变由 tests/test_runner.py 既有用例钉住,此处补新参数语义)、
-注册表 13 方法与手写 POST /sim/passthrough、HIPForm AnsysClient 同形兼容。
+POST /uploads/apdl(上传唯一通道)、PassthroughParams 边界(保留名/裸文件名/
+去重/上限)、kernels/passthrough.py(复制→runner→发布→results.csv)、
+runner required_outputs 参数化(默认 None 跳过缺件检查,新默认由
+tests/test_runner.py 钉住,此处补显式清单语义)、注册表 passthrough 单方法
+与手写 POST /sim/passthrough、HIPForm AnsysClient 同形兼容。
 全部用假 MAPDL 脚本或假内核,不触真 ansys221。
 """
 
@@ -25,7 +26,7 @@ from ansys_hip.registry import KernelError
 from ansys_hip.results import RESULTS_FILENAME, parse_results_csv
 from ansys_hip.runner import run_mapdl
 from ansys_hip.schemas import PassthroughParams, RunContext
-from ansys_hip.settings import PassthroughConfig, Settings, load_parts, load_settings
+from ansys_hip.settings import PassthroughConfig, Settings, load_settings
 
 # 复用既有测试工具(tests/ 在 sys.path;假 ansys 脚本构造器与提交/轮询助手)
 from test_api_core import REAL_CONFIG_PATH, read_resolved_params, submit, wait_for_terminal
@@ -142,7 +143,7 @@ def test_upload_apdl_accepts_whitelisted_suffixes(
 
 
 def test_upload_apdl_rejects_geometry_and_unknown_suffixes(client: TestClient) -> None:
-    """几何/未知后缀在 APDL 通道拒绝(与 /uploads 的 .step 白名单互不混用)。"""
+    """几何/未知后缀在 APDL 通道拒绝(直通通道只收 MAPDL 文本类输入)。"""
     for filename in ("m.step", "solver.exe", "noext"):
         response = client.post(
             "/uploads/apdl",
@@ -150,16 +151,6 @@ def test_upload_apdl_rejects_geometry_and_unknown_suffixes(client: TestClient) -
         )
         assert response.status_code == 400, filename
         assert response.json()["code"] == "INVALID_PARAMS"
-
-
-def test_upload_step_channel_still_rejects_inp(client: TestClient) -> None:
-    """既有 POST /uploads 行为不变:仍只收 .step/.stp/.stl(API 只增不减)。"""
-    response = client.post(
-        "/uploads",
-        files={"file": ("job.inp", b"/PREP7\n", "application/octet-stream")},
-    )
-    assert response.status_code == 400
-    assert response.json()["code"] == "INVALID_PARAMS"
 
 
 # ---------------------------------------------------------------------------
@@ -342,15 +333,15 @@ def test_submit_rejected_403_when_disabled(client: TestClient, fake_executors) -
 def test_submit_generic_path_rejected_403_when_disabled(
     settings: Settings, fake_executors
 ) -> None:
-    """泛化路径直调 _submit(类型化路由先注册截获已知方法,直调即泛化处理器
+    """泛化路径直调 _submit(手写路由先注册截获已知方法,直调即泛化处理器
     的请求处理体)— 两路共用同一条管线,开关检查同样生效。"""
     app = create_app(settings)  # 不进 lifespan:403 早返回,队列零接触
     spec = registry.REGISTRY[registry.PASSTHROUGH_METHOD]
     with pytest.raises(ApiError) as excinfo:
         _submit(
-            spec, None,
+            spec,
             {"entry_file": "/var/uploads/x_job.inp", "declared_outputs": ["results.csv"]},
-            settings, load_parts(settings.parts_dir), app.state.queue,
+            settings, app.state.queue,
         )
     assert excinfo.value.status_code == 403
     assert excinfo.value.detail["code"] == "PASSTHROUGH_DISABLED"
@@ -424,7 +415,7 @@ def test_files_outside_uploads_rejected(
 
 
 # ---------------------------------------------------------------------------
-# Step 3a:runner required_outputs 参数化(默认行为由 test_runner.py 既有用例钉住)
+# Step 3a:runner required_outputs 参数化(新默认 None 由 test_runner.py 钉住)
 # ---------------------------------------------------------------------------
 
 def _make_job_dir(tmp_path: Path) -> Path:
@@ -453,17 +444,24 @@ def test_runner_required_outputs_none_skips_summary_check(tmp_path: Path) -> Non
     assert result["returncode"] == 0
 
 
-def test_runner_explicit_default_matches_legacy_behavior(tmp_path: Path) -> None:
-    """显式传默认值 (SUMMARY_FILENAME,) 与不传完全同形(INTERNAL + summary.csv)。"""
+def test_runner_explicit_required_outputs_restores_internal(tmp_path: Path) -> None:
+    """默认不传(= None)正常结束即成功;显式传清单则恢复缺件 INTERNAL
+    (类型化方法的 summary.csv 契约已移除,显式清单留作强契约能力)。"""
     job_dir = _make_job_dir(tmp_path)
     bin_path = tmp_path / "ansys_nosum"
     _make_fake_ansys(bin_path, 'echo "SOLUTION IS DONE" > "$out"')
     ctx = _ctx(job_dir, bin_path)
-    for kwargs in ({}, {"required_outputs": ("summary.csv",)}):
-        with pytest.raises(KernelError) as excinfo:
-            run_mapdl(job_dir / "job.inp", job_dir, ctx, "pt-default", **kwargs)
-        assert excinfo.value.code == "INTERNAL"
-        assert "summary.csv" in excinfo.value.message
+
+    result = run_mapdl(job_dir / "job.inp", job_dir, ctx, "pt-default")
+    assert result["returncode"] == 0
+
+    with pytest.raises(KernelError) as excinfo:
+        run_mapdl(
+            job_dir / "job.inp", job_dir, ctx, "pt-explicit",
+            required_outputs=("summary.csv",),
+        )
+    assert excinfo.value.code == "INTERNAL"
+    assert "summary.csv" in excinfo.value.message
 
 
 def test_runner_custom_required_outputs_enforced(tmp_path: Path) -> None:

@@ -6,7 +6,8 @@
     interactive_available() -> bool                      PyMAPDL 可选(阶段 2 接 gRPC)
 
 诊断顺序:许可错误(LICENSE_UNAVAILABLE)→ MAPDL ERROR 行/非零退出
-(CONVERGENCE_FAILED,附 job.out 关键行)→ 正常结束但无 summary.csv(INTERNAL)。
+(CONVERGENCE_FAILED,附 job.out 关键行);required_outputs 非空时缺件 →
+INTERNAL(默认 None 跳过,直通通道由内核按 declared_outputs 自行判定)。
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .registry import KernelError
-from .results import OUT_FILENAME, SUMMARY_FILENAME, extract_error_lines
+from .results import OUT_FILENAME, extract_error_lines
 from .schemas import RunContext
 
 # -j 作业名:MAPDL 各中间文件(.esav/.full 等)以此为前缀;job_id 含 '-'/'_' 不适用,固定短名
@@ -82,7 +83,7 @@ def run_mapdl(
     job_dir: Path,
     ctx: RunContext,
     job_id: str,
-    required_outputs: Sequence[str] | None = (SUMMARY_FILENAME,),
+    required_outputs: Sequence[str] | None = None,
 ) -> dict:
     """以批处理模式执行 inp:轮询等待,超时/取消 killpg,输出诊断。
 
@@ -90,9 +91,9 @@ def run_mapdl(
         MAPDL_NOT_FOUND / TIMEOUT / LICENSE_UNAVAILABLE /
         CONVERGENCE_FAILED(附 job.out 错误行) / INTERNAL
 
-    required_outputs:正常结束后必须存在于 job_dir 的文件名清单(缺任一 → INTERNAL)。
-    None = 跳过该检查(直通通道由内核按 declared_outputs 自行判定产出)。
-    既有调用方不传 → 默认 (summary.csv,),行为与历史版本逐字节一致。
+    required_outputs:正常结束后必须存在于 job_dir 的文件名清单(缺任一 → INTERNAL);
+    默认 None = 跳过该检查(直通通道由内核按 declared_outputs 自行判定产出,
+    类型化方法的 summary.csv 契约已随方法库移除)。
     """
     bin_path = Path(ctx.ansys_bin)
     if not bin_path.is_file():

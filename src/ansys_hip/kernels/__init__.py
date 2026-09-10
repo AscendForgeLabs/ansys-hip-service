@@ -1,11 +1,7 @@
 """方法内核包 — 每个模块提供若干 run_<method>(params, ctx) -> dict。
 
 子模块(与 registry.KERNEL_MODULES 对应):
-    arrhenius   densification / process-window / sensitivity
-    shrinkage   shrinkage-estimate / compensate
-    calibrate   calibrate
-    materials   material-query(数据在 data/materials.yaml)
-    fem         axisym-hip / axisym-thermal / axisym-mechanical / full3d-hip / mesh
+    passthrough 直通通道(上游自带 APDL 输入直接交 MAPDL 执行)
 
 约定(见 schemas.RunContext 与 registry.KernelError):
     - 同步函数,由队列在工作线程调用;
@@ -40,7 +36,7 @@ def artifact_dir(ctx: RunContext) -> Path:
 
 
 def publish_artifacts(ctx: RunContext, filenames: Sequence[str]) -> list[str]:
-    """把 MAPDL 在 job_dir 根写出的文件(series/summary 等)复制进 artifacts/。
+    """把 MAPDL 在 job_dir 根写出的文件(如 job.out/results.csv)复制进 artifacts/。
 
     MAPDL 以 job_dir 为工作目录,结果 csv 只能落在根部;发布 = 复制到
     artifacts/ 供下载端点服务。未产出的文件跳过并告警(不算错误),

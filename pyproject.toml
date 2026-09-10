@@ -12,7 +12,6 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.26",
     "scipy>=1.13",
-    "gmsh>=4.12",
     "meshio>=5.3",
     "trimesh>=4.4",
     "jinja2>=3.1",

@@ -20,7 +20,6 @@ from ansys_hip.settings import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_CONFIG_PATH = REPO_ROOT / "config" / "service.yaml"
-REAL_PARTS_DIR = REPO_ROOT / "config" / "parts"
 
 # 测试默认指向不存在的 ANSYS 路径 → /health 为 degraded(不依赖部署机)
 MISSING_ANSYS_BIN = "/nonexistent/ansys221"
@@ -30,7 +29,6 @@ MISSING_LICENSE = "/nonexistent/ansyslmd.lic"
 def make_settings(
     tmp_path: Path,
     *,
-    parts_dir: Path | None = None,
     disabled: tuple[str, ...] = (),
     ansys_bin: str = MISSING_ANSYS_BIN,
     license_file: str = MISSING_LICENSE,
@@ -52,14 +50,13 @@ def make_settings(
                 retention_days=base.storage.retention_days,
             ),
             "methods": MethodsConfig(disabled=disabled),
-            "parts_dir": parts_dir if parts_dir is not None else REAL_PARTS_DIR,
         }
     )
 
 
 @pytest.fixture
 def settings_factory(tmp_path):
-    """按需构造测试 Settings(默认用真实零件配置目录)。"""
+    """按需构造测试 Settings(默认 passthrough 关闭,按需在用例内开启)。"""
     def _factory(**kwargs: Any) -> Settings:
         return make_settings(tmp_path, **kwargs)
 
