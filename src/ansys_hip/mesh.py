@@ -212,14 +212,20 @@ def _add_physical_groups(capsule_vols: Sequence[int], powder_vols: Sequence[int]
 
 
 def _configure_meshing(mesh_size_mm: float) -> None:
-    """一阶四面体、均匀网格尺寸、Algorithm3D=1(HIPForm 同款设置)。"""
+    """一阶四面体、均匀网格尺寸、Algorithm3D=10(HXT)。
+
+    HXT 比经典 Delaunay(=1,HIPForm 同款)对真实包套几何更鲁棒且快约 7×
+    (实测 capsule+cavity 6mm:1.5s/60.9 万单元 vs 10.1s/68.6 万)。
+    注意:真实几何含细抽气管特征,mesh_size 过粗(>6mm)时边界网格
+    面片重叠,gmsh 会报错 — 由 KernelError INTERNAL 透出。
+    """
     for option, value in (
         ("Mesh.MeshSizeMin", mesh_size_mm),
         ("Mesh.MeshSizeMax", mesh_size_mm),
         ("Mesh.MeshSizeFromCurvature", 0),
         ("Mesh.MeshSizeExtendFromBoundary", 0),
         ("Mesh.ElementOrder", 1),
-        ("Mesh.Algorithm3D", 1),
+        ("Mesh.Algorithm3D", 10),
     ):
         gmsh.option.setNumber(option, value)
 
@@ -370,12 +376,15 @@ def _write_stl(formats: tuple[str, ...], workdir: Path, data: MeshData) -> list[
 
 
 def exterior_faces_from_cdb(cdb_path: Path | str) -> list[tuple[int, int]]:
-    """解析自产 .cdb,返回外边界面列表 [(单元号, 载荷面号 1-4), ...]。
+    """解析自产 .cdb,返回外边界面列表 [(单元号, SOLID45 载荷面号), ...]。
 
     供 3D 模板直接 SFE 加均压外压(绕开 ESURF/SURF154):
-    单元号 = E 命令出现顺序(1 起);载荷面号 = E 序中缺失节点所在位置
-    (四面体面 i 与节点 i 相对,MAPDL 实体单元面编号约定)。
+    单元号 = E 命令出现顺序(1 起)。四面体面按"与节点 i 相对"编号(1-4),
+    再映射到退化 SOLID45 六面体面号 — 映射由单四面体 SFE/反力实测得出
+    (四面体面 1→六面体面 3,2→5,3→2,4→1;六面体面 4/6 为退化凝聚面,
+    加压会被 "condensed face" 警告忽略)。
     """
+    tet_face_to_solid45 = {1: 3, 2: 5, 3: 2, 4: 1}
     path = Path(cdb_path)
     if not path.is_file():
         raise KernelError("INTERNAL", f".cdb 网格工件不存在: {path}")
@@ -392,7 +401,7 @@ def exterior_faces_from_cdb(cdb_path: Path | str) -> list[tuple[int, int]]:
         missing_position = next(
             index for index, node in enumerate(tets[first_tet]) if node not in key
         )
-        faces.append((first_tet + 1, missing_position + 1))
+        faces.append((first_tet + 1, tet_face_to_solid45[missing_position + 1]))
     return sorted(faces)
 
 

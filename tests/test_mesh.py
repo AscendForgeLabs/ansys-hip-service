@@ -210,7 +210,8 @@ class TestExteriorFaces:
         faces = exterior_faces_from_cdb(cdb)
         assert len(faces) > 0
         assert all(1 <= elem <= result["element_count"] for elem, _ in faces)
-        assert all(1 <= face <= 4 for _, face in faces)
+        # 退化 SOLID45 六面体面号:四面体面 1-4 映射到 3/5/2/1(面 4/6 为凝聚面)
+        assert all(face in {1, 2, 3, 5} for _, face in faces)
         # 单元四面共 4 面,外表面必是全部面的严格子集
         total_faces = 4 * result["element_count"]
         assert len(faces) < total_faces
@@ -284,14 +285,14 @@ class TestTemplateRender:
         assert "KEYOPT,1,3,1" in text
         assert "ANTYPE,TRANS" in text
         assert "TUNIF,20" in text
-        assert "SFL,ALL,TEMP,900" in text
-        assert "*CFOPEN,series,csv,,,APPEND" in text
+        assert "DL,ALL,,TEMP,900" in text  # 温度边界 = DOF 约束(SFL 无 TEMP 载荷项)
+        assert "*CFOPEN,series,csv" in text  # 循环外单次开写(APPEND 不可靠)
         assert "MPTEMP,1,20" in text
         assert "MPDATA,KXX,1,1," in text
         assert "MPDATA,C,1,1," in text
         assert "MPDATA,DENS,1,1,4.43e-09" in text  # 4430 kg/m3 → 4.43e-9 tonne/mm3
-        assert "npr1 = NODE(0,30)" in text
-        assert "*VWRITE,tcur,1,vpr1" in text
+        assert "npr1 = NODE(0,30,0)" in text  # 轴对称 X=径向,Y=轴向,Z=0(NODE 需 3 参)
+        assert "*VWRITE,tcur,'1',vpr1" in text  # 探针列为字符字面量(I2 会打印 ** )
         assert "AGLUE,ALL" in text
 
     def test_axisym_hip_keywords(self):
@@ -323,9 +324,9 @@ class TestTemplateRender:
         )
         assert "ET,1,PLANE183" in text
         assert "SFL,ALL,PRES,120" in text
-        assert "nsec1 = NODE(0,30)" in text
+        assert "nsec1 = NODE(0,30,0)" in text
         assert "*GET,ssec1,NODE,nsec1,S,X" in text
-        assert "*VWRITE,rcur1,1,ssec1" in text
+        assert "*VWRITE,rcur1,'1',ssec1" in text  # 探针列为字符字面量(I2 会打印 ** )
 
     def test_3d_keywords(self):
         text = render(
@@ -333,17 +334,17 @@ class TestTemplateRender:
             cdb_stem="capsule_powder",
             material_lines=["MP,EX,1,110000", "MP,EX,2,120000"],
             nlgeom=False,
-            anchor_1=(-30.0, -30.0, 0.0),
-            anchor_2=(30.0, -30.0, 0.0),
-            anchor_3=(-30.0, 30.0, 0.0),
+            x_min=-30.0,
+            y_min=-30.0,
+            z_min=0.0,
             pressure_faces=[(1, 4), (9, 1)],
             hold_pressure_mpa=120.0,
         )
         assert "/INPUT,capsule_powder,cdb" in text
         assert "SFE,1,4,PRES,,120" in text
         assert "SFE,9,1,PRES,,120" in text
-        assert "D,n1,UX,0" in text
-        assert "D,n2,UY,0 $ D,n2,UZ,0" in text
+        assert "NSEL,S,LOC,Z,0 $ D,ALL,UZ,0" in text
+        assert "NSEL,S,LOC,X,-30 $ D,ALL,UX,0" in text
         assert "NLGEOM,0" in text
         assert "ETABLE,vmse,S,EQV" in text
 
@@ -358,7 +359,7 @@ class TestTemplateRender:
         write_input(
             "template_3d.inp", out,
             cdb_stem="capsule_powder", material_lines=[], nlgeom=False,
-            anchor_1=(0, 0, 0), anchor_2=(1, 0, 0), anchor_3=(0, 1, 0),
+            x_min=0.0, y_min=0.0, z_min=0.0,
             pressure_faces=[], hold_pressure_mpa=0.0,
         )
         assert out.is_file()
@@ -399,11 +400,19 @@ class TestResultsParsing:
 
     def test_extract_error_lines(self):
         out = "\n".join(
-            ["   *** ERROR ***  CP = 1.2", "normal line", "*** FATAL *** terminated", " error lowercase"]
+            [
+                "   *** ERROR ***  CP = 1.2",
+                "normal line",
+                "*** FATAL *** terminated",
+                " This could invalidate error estimation.",  # 警告散文中的小写 error,不是错误行
+                "NUMBER OF ERROR MESSAGES ENCOUNTERED= 0",  # 结尾统计行,排除
+                "The number of ERROR and WARNING messages exceeds 200.",  # 警告超量提示,排除
+            ]
         )
         lines = extract_error_lines(out)
-        assert len(lines) == 3
+        assert len(lines) == 2
         assert lines[0].startswith("*** ERROR ***")
+        assert lines[1].startswith("*** FATAL ***")
 
     def test_extract_error_lines_capped(self):
         out = "\n".join(f"*** ERROR *** {i}" for i in range(60))

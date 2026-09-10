@@ -54,14 +54,15 @@ ETABLE,vmse,S,EQV
 ESORT,ETAB,vmse
 *GET,vmax,SORT,,MAX
 *CFOPEN,summary,csv
-*VWRITE,'displacement_max_mm',dmax
-(A32,',',E16.8)
-*VWRITE,'von_mises_max_mpa',vmax
-(A32,',',E16.8)
+! 标签须 ≤8 字符(APDL 字符字面量超长被截断)
+*VWRITE,'disp_max',dmax
+(A8,',',E16.8)
+*VWRITE,'vm_max',vmax
+(A8,',',E16.8)
 *CFCLOSE
 ! ---- 中截面径向应力剖面(*GET SX;半径在第 1 列) ----
 {% for sample in section_samples %}
-nsec{{ loop.index }} = NODE({{ sample.radius|g }},{{ z_mid|g }})
+nsec{{ loop.index }} = NODE({{ sample.radius|g }},{{ z_mid|g }},0)
 rcur{{ loop.index }} = {{ sample.radius|g }}
 {% endfor %}
 {% for sample in section_samples %}
@@ -69,8 +70,8 @@ rcur{{ loop.index }} = {{ sample.radius|g }}
 {% endfor %}
 *CFOPEN,series,csv
 {% for sample in section_samples %}
-*VWRITE,rcur{{ loop.index }},1,ssec{{ loop.index }}
-(E16.8,',',I2,',',E16.8)
+*VWRITE,rcur{{ loop.index }},'1',ssec{{ loop.index }}
+(E16.8,',',A1,',',E16.8)
 {% endfor %}
 *CFCLOSE
 FINISH

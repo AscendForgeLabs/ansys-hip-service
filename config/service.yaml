@@ -7,8 +7,8 @@ server:
   port: 8010
 
 ansys:
-  bin: /ansys/ansys_inc/v221/ansys/bin/ansys221
-  license_file: /usr/ansys_inc/shared_files/licensing/license_files/ansyslmd.lic
+  bin: /ansys/ansys_inc/v252/ansys/bin/ansys252   # 2025 R2(许可服务 lmgrd+ansyslmd@1055)
+  license_file: /ansys/ansys_inc/shared_files/licensing/license_files/ansyslmd.lic
   np: 4                 # 4 核 VM;跨机器部署时按目标机调整
   job_timeout_s: 14400  # 单个 MAPDL 作业超时(4h)
 

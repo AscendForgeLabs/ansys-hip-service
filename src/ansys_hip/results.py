@@ -28,14 +28,21 @@ MAX_ERROR_LINES = 40
 def extract_error_lines(out_text: str) -> list[str]:
     """从 job.out 文本中提取含错误特征的行(去空白、保序、限量)。
 
-    匹配 ANSYS 经典的 "*** ERROR ***" / "*** FATAL ***" 行;许可类错误行
-    通常也含 ERROR 关键字,由 runner 先行按许可特征识别,本函数不区分。
+    匹配 ANSYS 经典的 "*** ERROR ***" / "*** FATAL ***" 行(大小写敏感:真错误行
+    恒为大写关键字,小写 "error" 只出现在警告散文里,如 "could invalidate error
+    estimation.");许可类错误行通常也含 ERROR 关键字,由 runner 先行按许可特征
+    识别,本函数不区分。结尾的 "NUMBER OF ERROR/FATAL MESSAGES ENCOUNTERED= N"
+    与中途的 "The number of ERROR and WARNING messages exceeds 200."(警告超量
+    提示,真错误自身会以 *** ERROR *** 行出现)都是统计行,不是错误,排除。
     """
     lines = [
         stripped
         for raw in out_text.splitlines()
         for stripped in (raw.strip(),)
-        if stripped and any(keyword in stripped.upper() for keyword in ERROR_LINE_KEYWORDS)
+        if stripped
+        and not stripped.upper().startswith("NUMBER OF")
+        and not stripped.upper().startswith("THE NUMBER OF")
+        and any(keyword in stripped for keyword in ERROR_LINE_KEYWORDS)
     ]
     return lines[:MAX_ERROR_LINES]
 

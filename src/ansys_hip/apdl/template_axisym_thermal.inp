@@ -28,7 +28,7 @@ ESIZE,{{ mesh_size_mm|g }}
 AMESH,ALL
 ! ---- 探针节点(归一化 (r,z) 已换算物理坐标;NODE 取最近节点) ----
 {% for probe in probes %}
-npr{{ probe.index }} = NODE({{ probe.r|g }},{{ probe.z|g }})
+npr{{ probe.index }} = NODE({{ probe.r|g }},{{ probe.z|g }},0)
 vmax{{ probe.index }} = {{ initial_temp_c|g }}
 {% endfor %}
 ! ---- 初始温度 ----
@@ -38,13 +38,15 @@ ANTYPE,TRANS
 TIMINT,1                     ! 全热瞬态
 KBC,0                        ! 分段内坡道过渡
 OUTRES,ALL,ALL
+*CFOPEN,series,csv              ! 循环外单次开写(*CFOPEN 无可靠 APPEND,逐段重开会截断)
 {% for segment in segments %}
 ! ---- 段 {{ loop.index }}: t = {{ segment.t_end|g }} s,外表面 {{ segment.temp|g }} ℃ ----
 LSEL,S,LOC,X,{{ outer_r|g }}
-SFL,ALL,TEMP,{{ segment.temp|g }}
+DL,ALL,,TEMP,{{ segment.temp|g }}
 ALLSEL,ALL
 TIME,{{ segment.t_end|g }}
 NSUBST,{{ segment.nsub }}
+CNVTOL,HEAT,1.0E-4,0.01       ! 收敛判据下限(mW 单位制;避免降温段舍入噪声停滞)
 SOLVE
 /POST1
 SET,LAST
@@ -53,25 +55,25 @@ tcur = {{ segment.t_end|g }}
 *GET,vpr{{ probe.index }},NODE,npr{{ probe.index }},TEMP
 vmax{{ probe.index }} = MAX(vmax{{ probe.index }},vpr{{ probe.index }})
 {% endfor %}
-{% if loop.first %}*CFOPEN,series,csv{% else %}*CFOPEN,series,csv,,,APPEND{% endif %}
 {% for probe in probes %}
-*VWRITE,tcur,{{ probe.index }},vpr{{ probe.index }}
-(E16.8,',',I2,',',E16.8)
+*VWRITE,tcur,'{{ probe.index }}',vpr{{ probe.index }}
+(E16.8,',',A1,',',E16.8)
 {% endfor %}
-*CFCLOSE
 /SOLU
 {% endfor %}
+*CFCLOSE
 /POST1
 SET,LAST
 tfinal = {{ segments[-1].t_end|g }}
 *CFOPEN,summary,csv
-*VWRITE,'time_final_s',tfinal
-(A32,',',E16.8)
+! 标签须 ≤8 字符(APDL 字符字面量超长被截断)
+*VWRITE,'t_final',tfinal
+(A8,',',E16.8)
 {% for probe in probes %}
-*VWRITE,'max_temp_probe_{{ probe.index }}_c',vmax{{ probe.index }}
-(A32,',',E16.8)
-*VWRITE,'final_temp_probe_{{ probe.index }}_c',vpr{{ probe.index }}
-(A32,',',E16.8)
+*VWRITE,'tmax_pr{{ probe.index }}',vmax{{ probe.index }}
+(A8,',',E16.8)
+*VWRITE,'tfin_pr{{ probe.index }}',vpr{{ probe.index }}
+(A8,',',E16.8)
 {% endfor %}
 *CFCLOSE
 FINISH

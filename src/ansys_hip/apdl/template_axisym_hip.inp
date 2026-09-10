@@ -32,13 +32,18 @@ D,ALL,UX,0
 NSEL,S,LOC,Y,{{ z_from|g }}
 D,ALL,UY,0
 ALLSEL,ALL
-{% if nlgeom %}NLGEOM,1{% else %}NLGEOM,0{% endif %}
+{% if nlgeom %}
+NLGEOM,1
+{% else %}
+NLGEOM,0
+{% endif %}
 /SOLU
 ANTYPE,STATIC
 KBC,0
 OUTRES,ALL,ALL
 dmaxall = 0
 vmaxall = 0
+*CFOPEN,series,csv              ! 循环外单次开写(*CFOPEN 无可靠 APPEND,逐段重开会截断)
 {% for segment in segments %}
 ! ---- 段 {{ loop.index }}: t = {{ segment.t_end|g }} s,外压 {{ segment.pressure|g }} MPa ----
 LSEL,S,LOC,X,{{ outer_r|g }}
@@ -62,21 +67,21 @@ ESORT,ETAB,vmse
 *GET,vcur,SORT,,MAX
 vmaxall = MAX(vmaxall,vcur)
 tcur = {{ segment.t_end|g }}
-{% if loop.first %}*CFOPEN,series,csv{% else %}*CFOPEN,series,csv,,,APPEND{% endif %}
-*VWRITE,tcur,0,dcur
-(E16.8,',',I2,',',E16.8)
-*CFCLOSE
+*VWRITE,tcur,'0',dcur
+(E16.8,',',A1,',',E16.8)
 /SOLU
 {% endfor %}
+*CFCLOSE
 /POST1
 SET,LAST
 tfinal = {{ segments[-1].t_end|g }}
 *CFOPEN,summary,csv
-*VWRITE,'displacement_max_mm',dmaxall
-(A32,',',E16.8)
-*VWRITE,'von_mises_max_mpa',vmaxall
-(A32,',',E16.8)
-*VWRITE,'time_final_s',tfinal
-(A32,',',E16.8)
+! 标签须 ≤8 字符(APDL 字符字面量超长被截断)
+*VWRITE,'disp_max',dmaxall
+(A8,',',E16.8)
+*VWRITE,'vm_max',vmaxall
+(A8,',',E16.8)
+*VWRITE,'t_final',tfinal
+(A8,',',E16.8)
 *CFCLOSE
 FINISH

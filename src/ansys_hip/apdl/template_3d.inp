@@ -13,14 +13,16 @@
 {% endfor %}
 ! ---- 网格(命令流: ET,1,SOLID45 + N + MAT/E) ----
 /INPUT,{{ cdb_stem }},cdb
-! ---- 3-2-1 点约束(NODE 取包围盒角部最近节点) ----
-n1 = NODE({{ anchor_1[0]|g }},{{ anchor_1[1]|g }},{{ anchor_1[2]|g }})
-D,n1,UX,0 $ D,n1,UY,0 $ D,n1,UZ,0
-n2 = NODE({{ anchor_2[0]|g }},{{ anchor_2[1]|g }},{{ anchor_2[2]|g }})
-D,n2,UY,0 $ D,n2,UZ,0
-n3 = NODE({{ anchor_3[0]|g }},{{ anchor_3[1]|g }},{{ anchor_3[2]|g }})
-D,n3,UZ,0
-{% if nlgeom %}NLGEOM,1{% else %}NLGEOM,0{% endif %}
+! ---- 3-2-1 分布式约束(包围盒三极小平面各锁一向;点约束会应力奇异) ----
+NSEL,S,LOC,Z,{{ z_min|g }} $ D,ALL,UZ,0
+NSEL,S,LOC,X,{{ x_min|g }} $ D,ALL,UX,0
+NSEL,S,LOC,Y,{{ y_min|g }} $ D,ALL,UY,0
+ALLSEL,ALL
+{% if nlgeom %}
+NLGEOM,1
+{% else %}
+NLGEOM,0
+{% endif %}
 /SOLU
 ANTYPE,STATIC
 ! ---- 外表面均压(全部外边界面;面号与 E 序缺失节点位置对应) ----
@@ -44,11 +46,12 @@ ETABLE,vmse,S,EQV
 ESORT,ETAB,vmse
 *GET,vmax,SORT,,MAX
 *CFOPEN,summary,csv
-*VWRITE,'displacement_max_mm',dmax
-(A32,',',E16.8)
-*VWRITE,'von_mises_max_mpa',vmax
-(A32,',',E16.8)
-*VWRITE,'hold_pressure_mpa',{{ hold_pressure_mpa|g }}
-(A32,',',E16.8)
+! 标签须 ≤8 字符(APDL 字符字面量超长被截断)
+*VWRITE,'disp_max',dmax
+(A8,',',E16.8)
+*VWRITE,'vm_max',vmax
+(A8,',',E16.8)
+*VWRITE,'p_hold',{{ hold_pressure_mpa|g }}
+(A8,',',E16.8)
 *CFCLOSE
 FINISH

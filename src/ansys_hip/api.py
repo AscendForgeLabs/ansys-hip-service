@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -129,10 +130,7 @@ def _health_router(settings: Settings, queue: JobQueue) -> APIRouter:
     def health() -> HealthReport:
         """MAPDL 可执行与许可文件状态 + 队列计数;两者齐备为 ok,否则 degraded。"""
         mapdl_found = _is_executable_file(settings.ansys.bin)
-        license_env_set = (
-            bool(settings.ansys.license_file)
-            and Path(settings.ansys.license_file).is_file()
-        )
+        license_env_set = _is_license_spec(settings.ansys.license_file)
         queue_running, queue_pending = queue.counts()
         return HealthReport(
             status="ok" if mapdl_found and license_env_set else "degraded",
@@ -149,6 +147,15 @@ def _health_router(settings: Settings, queue: JobQueue) -> APIRouter:
 def _is_executable_file(path: str) -> bool:
     """路径存在、是普通文件且具可执行位。"""
     return bool(path) and Path(path).is_file() and os.access(path, os.X_OK)
+
+
+def _is_license_spec(spec: str) -> bool:
+    """许可源已配置:.lic 文件路径存在,或为 FlexLM port@host 形式(如 1055@localhost)。"""
+    if not spec:
+        return False
+    if Path(spec).is_file():
+        return True
+    return re.fullmatch(r"\d{1,5}@[\w.\-]+", spec) is not None
 
 
 # ---------------------------------------------------------------------------

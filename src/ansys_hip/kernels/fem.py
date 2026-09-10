@@ -180,8 +180,8 @@ def run_axisym_hip(params: AxisymHipParams, ctx: RunContext) -> dict:
     }
     summary = parse_summary_csv(ctx.job_dir)
     return {
-        "displacement_max_mm": _summary_float(summary, "displacement_max_mm"),
-        "von_mises_max_mpa": _summary_float(summary, "von_mises_max_mpa"),
+        "displacement_max_mm": _summary_float(summary, "disp_max"),
+        "von_mises_max_mpa": _summary_float(summary, "vm_max"),
         "time_history": time_history,
         "artifacts": ["axisym_hip.inp", *publish_artifacts(
             ctx, (SERIES_FILENAME, SUMMARY_FILENAME)
@@ -223,8 +223,8 @@ def run_axisym_mechanical(params: AxisymMechanicalParams, ctx: RunContext) -> di
     ]
     summary = parse_summary_csv(ctx.job_dir)
     return {
-        "displacement_max_mm": _summary_float(summary, "displacement_max_mm"),
-        "von_mises_max_mpa": _summary_float(summary, "von_mises_max_mpa"),
+        "displacement_max_mm": _summary_float(summary, "disp_max"),
+        "von_mises_max_mpa": _summary_float(summary, "vm_max"),
         "section_stress": section_stress,
         "artifacts": ["axisym_mechanical.inp", *publish_artifacts(
             ctx, (SERIES_FILENAME, SUMMARY_FILENAME)
@@ -262,22 +262,22 @@ def run_full3d_hip(params: Full3dHipParams, ctx: RunContext) -> dict:
         for mat_id, material in ((POWDER_MAT_ID, powder), (CAPSULE_MAT_ID, capsule))
         for line in _elastic_lines_for_one(material, mat_id, hold_temperature_c)
     ]
-    (xmin, ymin, zmin), (xmax, ymax, _) = mesh_result["bbox"]["min"], mesh_result["bbox"]["max"]
+    xmin, ymin, zmin = mesh_result["bbox"]["min"]
     _execute(
         "template_3d.inp", "full3d_hip.inp", ctx,
-        cdb_stem=CDB_STEM,
+        cdb_stem=str(cdb_path.with_suffix("")),  # 绝对路径(MAPDL cwd=job_dir,裸 stem 找不到 artifacts/ 下的 cdb)
         material_lines=material_lines,
         nlgeom=bool(params.nlgeom),
-        anchor_1=(xmin, ymin, zmin),
-        anchor_2=(xmax, ymin, zmin),
-        anchor_3=(xmin, ymax, zmin),
+        x_min=xmin,
+        y_min=ymin,
+        z_min=zmin,
         pressure_faces=pressure_faces,
         hold_pressure_mpa=hold_pressure_mpa,
     )
     summary = parse_summary_csv(ctx.job_dir)
     return {
-        "displacement_max_mm": _summary_float(summary, "displacement_max_mm"),
-        "von_mises_max_mpa": _summary_float(summary, "von_mises_max_mpa"),
+        "displacement_max_mm": _summary_float(summary, "disp_max"),
+        "von_mises_max_mpa": _summary_float(summary, "vm_max"),
         "deformed_stl": None,  # 阶段 2(UPGEOM+变形网格导出);见汇报缺陷记录
         "artifacts": [f"{CDB_STEM}.cdb", "full3d_hip.inp", *publish_artifacts(
             ctx, (SUMMARY_FILENAME,)
