@@ -1,6 +1,6 @@
 # passthrough 直通转发通道 — 上游(HIPForm)对接开发文档
 
-版本 v1.0(2026-09-10)· 面向上游工作流作者(.inp 编写者)与引擎开发团队
+版本 v1.1(2026-09-11)· 面向上游工作流作者(.inp 编写者)与引擎开发团队
 
 > **本文档契约为规划口径,终稿以服务 `openapi()` 与实测响应为准。**
 > 字段级权威文档始终是 Swagger(`/docs` / `/redoc`,pydantic 模型 description 即文档);
@@ -156,12 +156,17 @@ passthrough 是**唯一提交通道**(`POST /sim/passthrough`,结果
 |---|---|---|
 | `/uploads/apdl` | POST | multipart 上传 .inp/.cdb/.mac/.csv/.txt,返回服务端路径 |
 | `/sim/passthrough` | POST | 提交 passthrough 作业(202) |
-| `/jobs/{id}` | GET | 轮询状态 + `stages` 阶段进度 |
+| `/jobs` | GET | 作业列表(队列 + 盘上历史,受理时间倒序;运维向) |
+| `/jobs/{id}` | GET | 轮询状态 + `stages` 阶段进度(服务重启后盘上历史作业仍可查) |
 | `/jobs/{id}/result` | GET | 结果 JSON(仅 succeeded) |
-| `/jobs/{id}/log` | GET | job.log 全文,`?tail=N` 取尾 |
+| `/jobs/{id}/log` | GET | 作业日志纯文本;`?source=job.log\|job.out` 选源,`?tail=N` 取尾 |
 | `/jobs/{id}/artifacts` | GET | 工件文件名数组 |
 | `/jobs/{id}/artifacts/{name}` | GET | 流式下载单个工件 |
-| `/jobs/{id}` | DELETE | 取消并清理(终止进程组) |
+| `/jobs/{id}` | DELETE | 取消并清理(终止进程组;对历史终态作业为纯目录清理) |
+| `/service/log` | GET | 服务请求日志尾部(运维向,`?tail=N`) |
+
+运维面板:`GET /panel`(自托管单页:作业列表/详情/双日志/服务日志,
+内网免鉴权);请求访问日志落盘 `var/logs/access.log`(按天轮转,默认保 14 天)。
 
 ### 3.1 第一步:上传文件(逐文件)
 
@@ -260,6 +265,9 @@ curl -s http://localhost:8010/jobs/9d2f.../artifacts
 
 # 单个工件流式下载(大文件边下边写,不整读内存)
 curl -s -O http://localhost:8010/jobs/9d2f.../artifacts/deform.csv
+
+# 作业日志(纯文本):job.log=服务簿记事件,job.out=MAPDL 求解输出(运行中也可看)
+curl -s "http://localhost:8010/jobs/9d2f.../log?source=job.out&tail=50"
 ```
 
 passthrough 结果 JSON 字段:
@@ -345,7 +353,7 @@ with httpx.Client(timeout=60) as client:
 | `METHOD_NOT_FOUND` | 泛化 `/sim/{method}` 未知方法名(单通道下即非 `passthrough` 的提交路径) | 404 |
 | `METHOD_DISABLED` | 方法被 config `methods.disabled` 显式停用 | 503 |
 | `METHOD_NOT_IMPLEMENTED` | 方法在注册表但内核未实现 | 501 |
-| `JOB_NOT_FOUND` | 作业 id 不存在(含已删除/服务重启后) | 404 |
+| `JOB_NOT_FOUND` | 作业 id 不存在(已删除或超出保留期被清扫;服务重启后盘上历史作业仍可经 `/jobs` 与 `/jobs/{id}` 查询,不会因此报此错) | 404 |
 | `ARTIFACT_NOT_FOUND` | `artifacts/{name}` 文件名不在该作业工件列表 | 404 |
 | `RESULT_NOT_READY` | result 端点对 pending/running/cancelled 作业 | 409 |
 | `JOB_FAILED` | result 端点对 failed 作业(body 带原 error 的 code/message) | 409 |

@@ -16,6 +16,7 @@ HIP 仿真**纯 MAPDL 转发器** — 面向 HIPForm 的 ANSYS/MAPDL 计算运�
 uv sync --extra dev
 uv run uvicorn ansys_hip.main:app --host 0.0.0.0 --port 8010
 # Swagger 详细文档: http://<host>:8010/docs
+# 运维面板: http://<host>:8010/panel(作业列表/详情/日志/服务日志;根路径 / 自动跳转)
 # 开启 passthrough: config/service.yaml 的 passthrough.enabled,
 #                  或环境变量 HIP_SERVICE_PASSTHROUGH_ENABLED=true
 ```
@@ -35,6 +36,7 @@ uv run uvicorn ansys_hip.main:app --host 0.0.0.0 --port 8010
 - ANSYS v252 批处理路径与许可文件;
 - 队列并发(单许可 → 1)、作业超时(4h,用户 `timeout_s` 取 min);
 - 存储目录(jobs/uploads)与保留期;
+- 请求访问日志 `var/logs/access.log`(按天轮转,保留 `access_log.retention_days` 天,默认 14);
 - `passthrough.enabled` 开关(默认 false)。
 
 ## 环境
