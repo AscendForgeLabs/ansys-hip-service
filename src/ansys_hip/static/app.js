@@ -16,6 +16,7 @@ const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled"];
 const DEFAULT_INTERVAL_MS = 3000;
 const LOG_FOLLOW_MS = 2000;
 const MAX_RENDER_LINES = 2000; // 大日志渲染上限:只渲染末 N 行,防 DOM 爆炸
+const PIN_TO_BOTTOM_PX = 24; // 距底小于该值(像素)视为"钉在底部"
 
 // ===== 状态(不可变更新:一律整体替换,不改原对象)=====
 let state = {
@@ -403,6 +404,10 @@ function buildLogUrl(job, source, tail) {
 // 抽屉日志请求序号:旧响应(续追定时器/切源/切档并发)不得覆盖新请求的结果
 let drawerLogSeq = 0;
 
+function isPinnedToBottom(box) {
+  return box.scrollHeight - box.scrollTop - box.clientHeight <= PIN_TO_BOTTOM_PX;
+}
+
 async function fetchDrawerLog() {
   const drawer = state.drawer;
   if (!drawer.job || !drawer.jobId) return;
@@ -412,8 +417,10 @@ async function fetchDrawerLog() {
     const text = await fetchText(buildLogUrl(drawer.job, drawer.source, drawer.tail));
     if (seq !== drawerLogSeq || state.drawer.jobId !== jobId) return;
     const box = $("log-content");
+    // 先量旧内容的位置再替换:用户上翻阅读历史时不被轮询拽回底部
+    const wasPinned = isPinnedToBottom(box);
     renderLogLines(box, text, "job");
-    if (drawer.follow) box.scrollTop = box.scrollHeight; // 续追:钉在底部
+    if (drawer.follow && wasPinned) box.scrollTop = box.scrollHeight; // 续追钉底
   } catch (err) {
     if (seq !== drawerLogSeq || state.drawer.jobId !== jobId) return;
     renderLogLines($("log-content"), "日志加载失败:" + err.code + ":" + err.message, "job");
@@ -481,8 +488,10 @@ async function refreshServiceLog() {
   try {
     const text = await fetchText(url);
     if (seq !== serviceLogSeq) return;
+    // 自动刷新只跟随"原本就在底部"的视图:上翻阅读历史不被拽回最新
+    const wasPinned = isPinnedToBottom(box);
     renderLogLines(box, text, "service");
-    box.scrollTop = box.scrollHeight;
+    if (wasPinned) box.scrollTop = box.scrollHeight;
   } catch (err) {
     if (seq !== serviceLogSeq) return;
     renderLogLines(box, "服务日志加载失败:" + err.code + ":" + err.message, "service");
