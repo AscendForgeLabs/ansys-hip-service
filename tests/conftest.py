@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from ansys_hip import registry
 from ansys_hip.api import create_app
 from ansys_hip.settings import (
+    AccessLogConfig,
     AnsysConfig,
     MethodsConfig,
     Settings,
@@ -50,6 +51,10 @@ def make_settings(
                 retention_days=base.storage.retention_days,
             ),
             "methods": MethodsConfig(disabled=disabled),
+            # 访问日志同样隔离到 tmp:测试运行不写仓库 var/logs/access.log
+            "access_log": AccessLogConfig(
+                file=str(tmp_path / "logs" / "access.log")
+            ),
         }
     )
 

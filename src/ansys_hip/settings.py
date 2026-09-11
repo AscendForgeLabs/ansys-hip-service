@@ -93,6 +93,16 @@ class PassthroughConfig(BaseModel):
     enabled: bool = False
 
 
+class AccessLogConfig(BaseModel):
+    """请求访问日志配置(独立完整服务日志:全部请求一字不漏,含 /health
+    轮询、静态资源与 404;按天午夜轮转,面板 GET /service/log 可查)。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    file: str = "var/logs/access.log"
+    retention_days: int = Field(default=14, ge=1)
+
+
 class Settings(BaseModel):
     """服务全量配置(不可变);config_path 由加载过程注入。"""
 
@@ -104,6 +114,7 @@ class Settings(BaseModel):
     storage: StorageConfig = StorageConfig()
     methods: MethodsConfig = MethodsConfig()
     passthrough: PassthroughConfig = PassthroughConfig()
+    access_log: AccessLogConfig = Field(default_factory=AccessLogConfig)
     config_path: Path = DEFAULT_CONFIG_PATH
 
     @property
@@ -115,6 +126,11 @@ class Settings(BaseModel):
     def uploads_root(self) -> Path:
         """上传文件根目录(绝对路径)。"""
         return Path(self.storage.uploads_dir).resolve()
+
+    @property
+    def access_log_path(self) -> Path:
+        """请求访问日志文件路径(绝对路径)。"""
+        return Path(self.access_log.file).resolve()
 
 
 # ---------------------------------------------------------------------------

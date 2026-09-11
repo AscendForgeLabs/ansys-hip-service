@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .registry import Executor, KernelError, MethodSpec
 from .results import parse_progress_csv
@@ -42,6 +42,9 @@ LOG_FILENAME = "job.log"
 ARTIFACTS_DIRNAME = "artifacts"
 TERMINAL_STATUS_VALUES = frozenset({"succeeded", "failed", "cancelled"})
 ACTIVE_STATUSES = frozenset({JobStatusEnum.PENDING, JobStatusEnum.RUNNING})
+# 裸目录名守卫:拒空串/路径分隔/当前与父目录(路由正则已挡 '/',此处纵深防御,
+# 防 jobs_root / "" 等拼接退化为 jobs 根自身)
+ILLEGAL_DIR_NAMES = frozenset({"", "/", "\\", ".", ".."})
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,17 @@ class JobRecord:
     started_at: str | None = None
     finished_at: str | None = None
     error: ErrorBody | None = None
+
+
+@dataclass(frozen=True)
+class JobSnapshot:
+    """API 层作业视图:活跃作业实时投影;历史作业由 state.json 只读重建
+    (服务重启后仍可见)。历史作业无从(也不应)重建 params/executor,
+    故与 JobRecord 平行提供只读视图,不带执行语义 — id/status/error 一律
+    经 state 取得,仅 job_dir(JobState 不携带)随快照携带。"""
+
+    job_dir: Path
+    state: JobState
 
 
 class JobQueue:
@@ -172,6 +186,64 @@ class JobQueue:
             stages=parse_progress_csv(record.job_dir),
         )
 
+    def snapshot(self, job_id: str) -> JobSnapshot | None:
+        """按 ID 取作业快照:内存命中 → 实时投影;未命中 → 盘上历史只读重建。"""
+        record = self._jobs.get(job_id)
+        if record is not None:
+            return JobSnapshot(job_dir=record.job_dir, state=self.state(record))
+        return self._historic_snapshot(job_id)
+
+    def _historic_snapshot(self, job_id: str) -> JobSnapshot | None:
+        """盘上历史作业的只读视图(state.json 末帧);目录不存在/损坏 → None。"""
+        job_dir = self._job_dir(job_id)
+        if job_dir is None:
+            return None
+        state_path = job_dir / STATE_FILENAME
+        if not state_path.is_file():
+            return None
+        payload = _load_state_payload(state_path)
+        if payload is None:
+            return None
+        try:
+            state = JobState.model_validate(payload)
+        except ValidationError:
+            logger.warning("历史作业 %s 的 %s 不合法,已跳过", job_id, STATE_FILENAME)
+            return None
+        return JobSnapshot(job_dir=state_path.parent, state=state)
+
+    def _job_dir(self, job_id: str) -> Path | None:
+        """受统一守卫的作业目录路径;裸目录名非法 → None。
+
+        守卫 ''/'/'/'\\'/'.'/'..':防 jobs_root / "" 等拼接退化为
+        jobs 根自身(snapshot 读、remove 删、runner 终止共用此入口)。
+        """
+        if job_id in ILLEGAL_DIR_NAMES:
+            return None
+        return self._jobs_root / job_id
+
+    def list_jobs(self) -> list[JobState]:
+        """全部已知作业的 JobState:内存活跃(实时,含 stages 投影)∪
+        盘上有 state.json 的历史目录(只读末帧),按 (created_at, id) 倒序
+        (受理时间新者在前;created_at 秒级精度,同秒以 id 消除不确定性)。
+
+        submit() 先注册内存再落盘,内存 ⊇ 全部活跃作业,无竞态窗口;
+        坏 state.json 目录经 snapshot 返回 None 自然跳过(不 500)。
+        """
+        ids = set(self._jobs)
+        if self._jobs_root.is_dir():
+            ids.update(
+                state_path.parent.name
+                for state_path in self._jobs_root.glob(f"*/{STATE_FILENAME}")
+            )
+        states = [
+            snapshot.state
+            for job_id in ids
+            if (snapshot := self.snapshot(job_id)) is not None
+        ]
+        # 终序唯一由本行决定;上文集合迭代顺序无关紧要
+        states.sort(key=lambda state: (state.created_at, state.id), reverse=True)
+        return states
+
     def counts(self) -> tuple[int, int]:
         """队列计数 (running, pending) — /health 用。"""
         statuses = [record.status for record in self._jobs.values()]
@@ -192,11 +264,18 @@ class JobQueue:
         return True
 
     def remove(self, job_id: str) -> bool:
-        """删除作业记录与目录(DELETE /jobs/{id});不在队列表则返回 False。"""
-        if self._jobs.pop(job_id, None) is None:
+        """删除作业记录与目录(DELETE /jobs/{id});无论内存与否都清目录。
+
+        已知 = 内存在册 或 盘上 state.json 存在(历史作业删除成为真清理);
+        目录路径经 _job_dir 统一守卫,非法名不误删 jobs 根。
+        """
+        job_dir = self._job_dir(job_id)
+        if job_dir is None:
             return False
-        shutil.rmtree(self._jobs_root / job_id, ignore_errors=True)
-        return True
+        known_in_memory = self._jobs.pop(job_id, None) is not None
+        known_on_disk = (job_dir / STATE_FILENAME).is_file()
+        shutil.rmtree(job_dir, ignore_errors=True)
+        return known_in_memory or known_on_disk
 
     # ------------------------------------------------------------------
     # 工作协程
@@ -327,7 +406,9 @@ class JobQueue:
 
     def _runner_cancel(self, job_id: str) -> None:
         """防御性终止 MAPDL 进程(懒加载 runner.cancel_job,未就绪时跳过)。"""
-        job_dir = self._jobs_root / job_id
+        job_dir = self._job_dir(job_id)
+        if job_dir is None:
+            return
         try:
             from .runner import cancel_job  # noqa: PLC0415 — 懒加载,runner 未就绪不阻断
         except ImportError:

@@ -30,11 +30,28 @@ from fastapi import (
     status,
 )
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from . import __version__, registry
-from .queue import ACTIVE_STATUSES, ARTIFACTS_DIRNAME, JobQueue, LOG_FILENAME, RESULT_FILENAME
+from .access_log import configure_access_logging, make_access_log_middleware
+from .logtail import read_tail
+from .queue import (
+    ACTIVE_STATUSES,
+    ARTIFACTS_DIRNAME,
+    JobQueue,
+    JobSnapshot,
+    LOG_FILENAME,
+    RESULT_FILENAME,
+)
+from .results import OUT_FILENAME
 from .schemas import (
     ErrorBody,
     HealthReport,
@@ -59,8 +76,13 @@ SERVICE_DESCRIPTION = (
     "`GET /jobs/{id}/result` 取结果 JSON / `GET /jobs/{id}/artifacts/{name}` 下载工件。\n\n"
     "服务不做任何仿真逻辑,只治理作业/队列/超时/工件;参数原样落盘作业目录\n"
     "`resolved-params.json`,保证可追溯。\n\n"
+    "内置运维面板:`/panel`(作业列表/日志/服务请求日志,根路径 `/` 重定向至面板)。\n\n"
     "单位约定:mm / MPa / s / ℃。内网免鉴权部署,请勿暴露公网。"
 )
+
+# 内嵌运维面板静态资源目录(原生 JS 单页,零构建;目录缺失时挂载即启动失败,
+# 打包遗漏会在测试/启动第一时间暴露)
+_PANEL_DIR = Path(__file__).resolve().parent / "static"
 
 # 直通通道上传白名单:MAPDL 文本类输入(入口 .inp/.mac、模型 .cdb、数据 .csv/.txt);
 # 可执行/二进制格式一律拒绝
@@ -71,6 +93,17 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 LOG_TAIL_MAX_LINES = 10_000
 ARTIFACT_FORBIDDEN_PATTERNS = ("/", "\\", "..")
+# /jobs/{id}/log 的日志源白名单:精确匹配即防穿越/防读根部簿记文件
+# (job.out 运行中只在作业目录根部,内核结束/失败后才发布进 artifacts/)
+LOG_SOURCE_WHITELIST = frozenset({LOG_FILENAME, OUT_FILENAME})
+
+
+def _tail_query() -> Any:
+    """tail 参数共用工厂(两个日志端点同形:1 ≤ N ≤ LOG_TAIL_MAX_LINES,缺省全文)。"""
+    return Query(
+        default=None, ge=1, le=LOG_TAIL_MAX_LINES,
+        description="只取最后 N 行;缺省返回全文",
+    )
 
 # 非业务 HTTPException(路由未命中等)按状态码兜底的错误码
 _CODE_BY_STATUS: dict[int, str] = {
@@ -123,12 +156,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved_settings
     app.state.queue = queue
+    # 请求访问日志(独立完整服务日志):先配置 logger 再挂中间件,全部请求落盘
+    configure_access_logging(resolved_settings)
+    app.middleware("http")(make_access_log_middleware())
     app.include_router(_health_router(resolved_settings, queue))
     # sim 路由不统一打 tags:提交端点按方法组(注册表 GROUP_LABELS)折叠展示
     # (passthrough 手写路由,见 _sim_router)
     app.include_router(_sim_router(resolved_settings, queue), prefix="/sim")
     app.include_router(_jobs_router(queue), prefix="/jobs", tags=["jobs"])
     app.include_router(_uploads_router(resolved_settings), prefix="/uploads", tags=["uploads"])
+    # 运维面板(静态单页,挂载在 API 路由之后:既有 API 路径不受影响)
+    app.mount("/panel", StaticFiles(directory=_PANEL_DIR, html=True), name="panel")
     _install_error_handlers(app)
     return app
 
@@ -164,6 +202,26 @@ def _health_router(settings: Settings, queue: JobQueue) -> APIRouter:
             passthrough_enabled=settings.passthrough.enabled,
             version=__version__,
         )
+
+    @router.get(
+        "/service/log",
+        response_class=PlainTextResponse,
+        summary="服务请求日志(尾部)",
+    )
+    def get_service_log(tail: int | None = _tail_query()) -> PlainTextResponse:
+        """请求访问日志(var/logs/access.log,按天午夜轮转保留 14 天)尾部
+        N 行;缺省全文。"""
+        return PlainTextResponse(
+            read_tail(settings.access_log_path, tail),
+            media_type="text/plain",
+        )
+
+    @router.get("/", include_in_schema=False)
+    @router.get("/panel", include_in_schema=False)
+    def redirect_to_panel() -> RedirectResponse:
+        """根路径与 /panel(无尾斜杠)→ 307 至 /panel/(显式相对 Location —
+        框架自动斜杠重定向给绝对 URL,反向代理下可能拼错主机)。"""
+        return RedirectResponse(url="/panel/")
 
     return router
 
@@ -413,43 +471,49 @@ def _validation_summary(exc: ValidationError) -> str:
 def _jobs_router(queue: JobQueue) -> APIRouter:
     router = APIRouter()
 
-    def require_job(job_id: str):
-        record = queue.get(job_id)
-        if record is None:
+    def require_job(job_id: str) -> JobSnapshot:
+        """取作业快照(内存实时;服务重启后回退盘上历史只读视图)。"""
+        snapshot = queue.snapshot(job_id)
+        if snapshot is None:
             raise ApiError(
                 404, "JOB_NOT_FOUND",
-                f"作业 '{job_id}' 不存在(可能已删除;服务重启后历史作业不可见)",
+                f"作业 '{job_id}' 不存在(可能已删除或超出保留期被清扫)",
             )
-        return record
+        return snapshot
+
+    @router.get("", response_model=list[JobState], summary="作业列表(队列 + 历史)")
+    def list_jobs() -> list[JobState]:
+        """内存活跃(实时,含 stages 投影)+ 盘上历史(state.json 只读末帧),
+        按 (created_at, id) 倒序;服务重启后历史作业仍可见。"""
+        return queue.list_jobs()
 
     @router.get("/{job_id}", response_model=JobState, summary="查询作业状态")
     def get_job(job_id: str = PathParam(description="作业 ID(受理响应的 id)")) -> JobState:
         """作业状态机快照:pending → running → succeeded/failed/cancelled。"""
-        return queue.state(require_job(job_id))
+        return require_job(job_id).state
 
     @router.get(
         "/{job_id}/log",
         response_class=PlainTextResponse,
-        summary="作业日志(支持 tail)",
+        summary="作业日志(支持 tail 与日志源切换)",
     )
     def get_job_log(
         job_id: str = PathParam(description="作业 ID"),
-        tail: int | None = Query(
-            default=None, ge=1, le=LOG_TAIL_MAX_LINES,
-            description="只取最后 N 行;缺省返回全文",
+        tail: int | None = _tail_query(),
+        source: str = Query(
+            default=LOG_FILENAME,
+            description="日志源:job.log(状态事件)/ job.out(MAPDL 求解输出;"
+                        "运行中仅存在于作业目录根部,可实时查看)",
         ),
     ) -> PlainTextResponse:
-        """job.log 全文;?tail=N 只取最后 N 行。"""
-        record = require_job(job_id)
-        log_path = record.job_dir / LOG_FILENAME
-        text = (
-            log_path.read_text(encoding="utf-8", errors="replace")
-            if log_path.is_file()
-            else ""
-        )
-        if tail is not None:
-            lines = text.splitlines(keepends=True)
-            text = "".join(lines[-tail:])
+        """job.log / job.out 全文;?tail=N 只取最后 N 行。"""
+        snapshot = require_job(job_id)
+        if source not in LOG_SOURCE_WHITELIST:
+            raise ApiError(
+                400, "INVALID_PARAMS",
+                f"不支持的日志源 '{source}';允许: {sorted(LOG_SOURCE_WHITELIST)}",
+            )
+        text = read_tail(snapshot.job_dir / source, tail)
         return PlainTextResponse(text, media_type="text/plain")
 
     @router.get(
@@ -462,18 +526,20 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
     )
     def get_job_result(job_id: str = PathParam(description="作业 ID")) -> JSONResponse:
         """内核返回的结果 JSON;仅 succeeded 状态可取。"""
-        record = require_job(job_id)
-        if record.status in (JobStatusEnum.PENDING, JobStatusEnum.RUNNING):
+        snapshot = require_job(job_id)
+        if snapshot.state.status in (JobStatusEnum.PENDING, JobStatusEnum.RUNNING):
             raise ApiError(
                 409, "RESULT_NOT_READY",
-                f"作业尚未完成(当前状态 {record.status.value})",
+                f"作业尚未完成(当前状态 {snapshot.state.status.value})",
             )
-        if record.status is JobStatusEnum.CANCELLED:
+        if snapshot.state.status is JobStatusEnum.CANCELLED:
             raise ApiError(409, "RESULT_NOT_READY", "作业已取消,无结果")
-        if record.status is JobStatusEnum.FAILED:
-            error = record.error or ErrorBody(code="INTERNAL", message="未知失败原因")
+        if snapshot.state.status is JobStatusEnum.FAILED:
+            error = snapshot.state.error or ErrorBody(
+                code="INTERNAL", message="未知失败原因"
+            )
             raise ApiError(409, "JOB_FAILED", f"[{error.code}] {error.message}")
-        result_path = record.job_dir / RESULT_FILENAME
+        result_path = snapshot.job_dir / RESULT_FILENAME
         if not result_path.is_file():
             raise ApiError(500, "INTERNAL", f"result.json 缺失: {result_path}")
         return JSONResponse(content=json.loads(result_path.read_text(encoding="utf-8")))
@@ -486,8 +552,8 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
     )
     def list_artifacts(job_id: str = PathParam(description="作业 ID")) -> list[str]:
         """作业 artifacts/ 目录内的工件文件名(按名排序),供 /artifacts/{name} 下载。"""
-        record = require_job(job_id)
-        artifacts_dir = record.job_dir / ARTIFACTS_DIRNAME
+        snapshot = require_job(job_id)
+        artifacts_dir = snapshot.job_dir / ARTIFACTS_DIRNAME
         if not artifacts_dir.is_dir():
             return []
         return sorted(path.name for path in artifacts_dir.iterdir() if path.is_file())
@@ -505,8 +571,8 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         name: str = PathParam(description="工件文件名(取自 GET /jobs/{id}/artifacts)"),
     ) -> FileResponse:
         """下载作业 artifacts/ 目录内的工件(名称禁止路径分隔符与 '..')。"""
-        record = require_job(job_id)
-        artifact_path = _resolve_artifact_path(record.job_dir, name)
+        snapshot = require_job(job_id)
+        artifact_path = _resolve_artifact_path(snapshot.job_dir, name)
         return FileResponse(artifact_path, filename=name)
 
     @router.delete(
@@ -516,9 +582,10 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         responses={404: {"model": ErrorBody, "description": "作业不存在"}},
     )
     def delete_job(job_id: str = PathParam(description="作业 ID")) -> Response:
-        """pending/running 先取消(运行中会防御性终止内核),再清理作业目录。"""
-        record = require_job(job_id)
-        if record.status in ACTIVE_STATUSES:
+        """pending/running 先取消(运行中会防御性终止内核),再清理作业目录
+        (含服务重启后的盘上历史作业目录)。"""
+        snapshot = require_job(job_id)
+        if snapshot.state.status in ACTIVE_STATUSES:
             queue.cancel(job_id)
         queue.remove(job_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
