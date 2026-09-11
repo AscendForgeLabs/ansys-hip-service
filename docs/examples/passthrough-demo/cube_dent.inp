@@ -1,0 +1,212 @@
+/BATCH
+! ============================================================
+! passthrough 示范工程:3D 正方体顶部压头逐步凹陷演示(自包含,无外部文件依赖)
+!
+! 用途:passthrough 通道"三维过程帧"(Channel C)的全 3D 版示范 ——
+!       capsule_shrink 是 2D 轴对称,本案例是真三维实体网格(SOLID186),
+!       每载荷段导出一帧全节点坐标+位移,前端逐帧回放凹陷过程。
+! 契约要点(与 capsule_shrink.inp 同源,详见 docs/passthrough-guide.md 第 4 章):
+!   * MAPDL 以 mapdl -b -i cube_dent.inp 执行,cwd = 作业目录根;
+!     本文件写出的所有文件(progress.csv / frame_N.csv / deform.csv /
+!     results.csv)都落在作业目录根,由服务发布进 artifacts/。
+!   * progress.csv = 阶段进度侧车:行 = 阶段短标签(<=8 字符)+ 累计秒;
+!     *CFOPEN 无可靠 APPEND,采用 *DIM 数组自维护 + 整文件重写。
+!   * frame_N.csv = 每载荷段一帧(动画数据;3D:坐标+位移各三分量)。
+!   * deform.csv  = 末态节点 初始坐标+位移+变形后坐标(九列,3D 版)。
+!   * results.csv = 可选结构化结果(短标签+数值,服务自动解析进 result.values;
+!     无需在 declared_outputs 声明)。
+!   * 坑:*VWRITE 字符字面量标签 <=8 字符,超长被 MAPDL 静默截断。
+!     本文件逐标签自查:'node' 'x_mm' 'y_mm' 'z_mm' 'ux_mm' 'uy_mm' 'uz_mm'
+!     'x0_mm' 'y0_mm' 'z0_mm' 'xd_mm' 'yd_mm' 'zd_mm'
+!     'MESH' 'DENT_03' .. 'DENT_18' 'dent_dep' 'uy_min' 'seqv_max'(全部 <=8)。
+!
+! 物理:线弹性占位本构 —— 演示通道打通用,不构成对 HIP 物理的背书
+! (结果 fidelity = "passthrough",服务不背书物理内容)。
+! 单位:mm / MPa / s / ℃;MAT 编号遵守全局约定:1 = powder。
+!
+! 模型:20 mm 立方体(SOLID186,单元边 2 mm),底面 UY=0、X=0 面 UX=0、
+!       Z=0 面 UZ=0(利用对称性约束刚体位移);顶面中央 4x4 mm 方形
+!       压头节点集 6 段逐步下压,每段末压深增加 0.3 mm,末态 1.8 mm。
+!       (平坦方形压头的边界剪切集中限深:实测 2.5 mm 时压头边缘单元过度
+!       畸变发散,2.0 mm 收敛 —— 取 1.8 mm 留余量;回放端有变形倍率。)
+!       NLGEOM 大变形;段末态经 /POST1 *VGET 提取为 frame_N.csv。
+!
+! 若改动段数 NSEG:提交侧 declared_outputs 的帧文件名须同步改
+! (frame_%I% 生成 frame_1.csv .. frame_<NSEG>.csv)。
+! ============================================================
+
+/PREP7
+ET,1,186                    ! 20 节点六面体(二次完全积分,弯曲响应干净)
+
+! ---- 几何参数(mm) ----
+SIDE = 20                   ! 立方体边长
+PC   = SIDE/2               ! 压头中心(顶面形心)
+PW   = 2                    ! 压头半宽 -> 方形压头 4x4 mm
+
+! ---- 载荷参数:6 段下压(演示用伪时间轴,每段 600 s;负值 = 向下) ----
+NSEG = 6
+*DIM,DPHA,ARRAY,NSEG        ! 各段末压头位移 UY(mm,负)
+*DO,I,1,NSEG
+  DPHA(I) = -0.3*I
+*ENDDO
+*DIM,TSEGA,ARRAY,NSEG       ! 各段末累计时间(s;写入 progress.csv)
+*DO,I,1,NSEG
+  TSEGA(I) = 600*I
+*ENDDO
+*DIM,SEGLAB,CHAR,NSEG       ! 各段进度侧车标签(<=8 字符!)
+SEGLAB(1) = 'DENT_03'
+SEGLAB(2) = 'DENT_06'
+SEGLAB(3) = 'DENT_09'
+SEGLAB(4) = 'DENT_12'
+SEGLAB(5) = 'DENT_15'
+SEGLAB(6) = 'DENT_18'
+
+! ---- 几何 + 材料(线弹性演示占位;MAT 1 = powder) ----
+BLOCK,0,SIDE,0,SIDE,0,SIDE
+MP,EX,1,5000                ! 粉末占位:5 GPa(柔性,演示凹陷肉眼可见)
+MP,PRXY,1,0.30
+
+! ---- 网格 + 节点紧编号(NUMCMP 后节点号 1..NNOD 连续,便于向量写出) ----
+ESIZE,2
+VMESH,ALL
+NUMCMP,NODE
+ALLSEL,ALL
+
+! ---- 节点号表与坐标/位移数组(帧导出与变形几何导出共用) ----
+*GET,NNOD,NODE,,COUNT
+*DIM,NODNO,ARRAY,NNOD
+*VGET,NODNO(1),NODE,1,NLIST ! 节点号(紧编号下 = 行号)
+*DIM,XG,ARRAY,NNOD
+*DIM,YG,ARRAY,NNOD
+*DIM,ZG,ARRAY,NNOD
+*DIM,UXA,ARRAY,NNOD
+*DIM,UYA,ARRAY,NNOD
+*DIM,UZA,ARRAY,NNOD
+*DIM,XD,ARRAY,NNOD
+*DIM,YD,ARRAY,NNOD
+*DIM,ZD,ARRAY,NNOD
+
+! ---- 约束:底面 UY=0,X=0 面 UX=0,Z=0 面 UZ=0 ----
+NSEL,S,LOC,Y,0
+D,ALL,UY,0
+NSEL,S,LOC,X,0
+D,ALL,UX,0
+NSEL,S,LOC,Z,0
+D,ALL,UZ,0
+
+! ---- 压头节点集:顶面中央方形窗口,存为组件供每段重选 ----
+NSEL,S,LOC,Y,SIDE
+NSEL,R,LOC,X,PC-PW,PC+PW
+NSEL,R,LOC,Z,PC-PW,PC+PW
+CM,PTCH,NODE
+ALLSEL,ALL
+
+NLGEOM,1                     ! 大变形(压深 1.8 mm / 边长 20 mm ≈ 9%)
+
+! ---- 阶段进度侧车:登记表 + 首行 MESH(整文件重写式) ----
+NSTG = NSEG+1                ! 阶段总数 = MESH + NSEG 个求解段
+*DIM,PGLAB,CHAR,NSTG         ! 已完成阶段标签
+*DIM,PGTIM,ARRAY,NSTG        ! 对应累计秒(载荷步分析时间口径)
+PGLAB(1) = 'MESH'
+PGTIM(1) = 0
+*CFOPEN,progress,csv
+JL   = PGLAB(1)
+JTV  = PGTIM(1)
+*VWRITE,JL,JTV
+(A8,',',E16.8)
+*CFCLOSE
+
+/SOLU
+ANTYPE,STATIC
+KBC,0                        ! 段内斜坡加载
+OUTRES,ALL,ALL               ! 供 /POST1 SET,LAST 读回
+
+! ============================================================
+! 分段下压求解循环:每段 = 加载 → SOLVE → 帧导出 → 侧车重写
+! ============================================================
+*DO,I,1,NSEG
+
+  ! ---- 压头:重选组件,设本段末压深 ----
+  CMSEL,S,PTCH
+  D,ALL,UY,DPHA(I)
+  ALLSEL,ALL
+
+  TIME,TSEGA(I)              ! 段末时刻(s)
+  NSUBST,5                   ! 段内 5 个子步
+  SOLVE
+
+  ! ---- 帧导出:该段末变形状态(动画数据帧,3D 全节点) ----
+  /POST1
+  SET,LAST
+  *VGET,XG(1),NODE,1,LOC,X   ! 节点原始坐标(未 UPGEOM)
+  *VGET,YG(1),NODE,1,LOC,Y
+  *VGET,ZG(1),NODE,1,LOC,Z
+  *VGET,UXA(1),NODE,1,U,X    ! 节点位移
+  *VGET,UYA(1),NODE,1,U,Y
+  *VGET,UZA(1),NODE,1,U,Z
+  *CFOPEN,frame_%I%,csv      ! %I% 参数代入:frame_1.csv .. frame_6.csv
+  *VWRITE,'node','x_mm','y_mm','z_mm','ux_mm','uy_mm','uz_mm'
+  (A4,',',A4,',',A4,',',A4,',',A5,',',A5,',',A5)
+  *VWRITE,NODNO(1),XG(1),YG(1),ZG(1),UXA(1),UYA(1),UZA(1)
+  (E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8)
+  *CFCLOSE
+
+  ! ---- 侧车重写:登记本段后,全量重写 progress.csv ----
+  PGLAB(I+1) = SEGLAB(I)
+  PGTIM(I+1) = TSEGA(I)
+  *CFOPEN,progress,csv
+  *DO,J,1,I+1
+    JL   = PGLAB(J)
+    JTV  = PGTIM(J)
+    *VWRITE,JL,JTV
+  (A8,',',E16.8)
+  *ENDDO
+  *CFCLOSE
+
+  /SOLU                      ! 回求解器,进入下一段
+*ENDDO
+
+! ============================================================
+! 末段后处理:变形几何数据导出 + 可选结构化结果
+! ============================================================
+/POST1
+SET,LAST
+*VGET,XG(1),NODE,1,LOC,X
+*VGET,YG(1),NODE,1,LOC,Y
+*VGET,ZG(1),NODE,1,LOC,Z
+*VGET,UXA(1),NODE,1,U,X
+*VGET,UYA(1),NODE,1,U,Y
+*VGET,UZA(1),NODE,1,U,Z
+*VOPER,XD(1),XG(1),ADD,UXA(1)   ! 变形后坐标 = 原始 + 位移
+*VOPER,YD(1),YG(1),ADD,UYA(1)
+*VOPER,ZD(1),ZG(1),ADD,UZA(1)
+
+! ---- deform.csv:全节点 初始坐标+位移+变形后坐标(3D 九列) ----
+! 上游做粉末坯几何重构时直接消费(重构本身是上游职责)。
+*CFOPEN,deform,csv
+*VWRITE,'node','x0_mm','y0_mm','z0_mm','ux_mm','uy_mm','uz_mm','xd_mm','yd_mm','zd_mm'
+(A4,',',A5,',',A5,',',A5,',',A5,',',A5,',',A5,',',A5,',',A5,',',A5)
+*VWRITE,NODNO(1),XG(1),YG(1),ZG(1),UXA(1),UYA(1),UZA(1),XD(1),YD(1),ZD(1)
+(E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8)
+*CFCLOSE
+
+! ---- 标量极值 ----
+*VSCFUN,UYMN,MIN,UYA(1)      ! 全场最小 UY = 压坑底部(负)。
+!                            ! 注意:不能用 NSORT,U,Y,1,1 + *GET,SORT,,MIN ——
+!                            ! NSORT 默认 KABS=1 按绝对值排序,升序 MIN 会取到 0
+!                            ! (约束面上 uy=0 的节点);数组取极值无此歧义。
+NSORT,S,EQV,0,1
+*GET,SMAX,SORT,,MAX          ! 全场最大 von Mises(MPa)
+DDEP = -DPHA(NSEG)           ! 末态压深(正数口径)
+
+! ---- results.csv:短标签 + 数值(服务自动解析进 result.values,无需声明) ----
+*CFOPEN,results,csv
+*VWRITE,'dent_dep',DDEP
+(A8,',',E16.8)
+*VWRITE,'uy_min',UYMN
+(A8,',',E16.8)
+*VWRITE,'seqv_max',SMAX
+(A8,',',E16.8)
+*CFCLOSE
+
+FINISH
