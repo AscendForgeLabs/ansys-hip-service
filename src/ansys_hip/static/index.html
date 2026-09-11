@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HIP 仿真服务 · 运维面板</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <h1>HIP 仿真服务 · 运维面板</h1>
+  <div class="healthbar">
+    <span class="badge" id="hb-status">检测中</span>
+    <span class="hb-item">版本 <b id="hb-version">-</b></span>
+    <span class="hb-item">运行 <b id="hb-running">-</b></span>
+    <span class="hb-item">排队 <b id="hb-pending">-</b></span>
+    <span class="badge" id="hb-passthrough">直通:-</span>
+    <span class="hb-item" id="hb-mapdl">MAPDL:-</span>
+    <span class="hb-item" id="hb-license">许可:-</span>
+  </div>
+</header>
+
+<div id="error-bar" class="error-bar" hidden></div>
+
+<nav class="tabs">
+  <button type="button" class="tab-btn active" id="tab-jobs">作业</button>
+  <button type="button" class="tab-btn" id="tab-service">服务日志</button>
+</nav>
+
+<main>
+  <!-- 作业 tab -->
+  <section id="panel-jobs" class="panel">
+    <div class="toolbar">
+      <label>状态筛选
+        <select id="filter-select">
+          <option value="all" selected>全部</option>
+          <option value="pending">待执行</option>
+          <option value="running">运行中</option>
+          <option value="succeeded">已成功</option>
+          <option value="failed">已失败</option>
+          <option value="cancelled">已取消</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="auto-refresh" checked> 自动刷新</label>
+      <label>间隔
+        <select id="interval-select">
+          <option value="3000" selected>3 秒</option>
+          <option value="5000">5 秒</option>
+          <option value="10000">10 秒</option>
+        </select>
+      </label>
+      <button type="button" class="btn" id="refresh-btn">手动刷新</button>
+    </div>
+    <div class="table-wrap">
+      <table class="job-table">
+        <thead>
+          <tr>
+            <th>作业 ID</th><th>状态</th><th>方法</th><th>受理时间</th>
+            <th>耗时</th><th>阶段</th><th>错误码</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="job-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 服务日志 tab -->
+  <section id="panel-service" class="panel" hidden>
+    <div class="toolbar">
+      <label>行数
+        <select id="service-tail">
+          <option value="200">末 200 行</option>
+          <option value="500" selected>末 500 行</option>
+          <option value="2000">末 2000 行</option>
+          <option value="0">全文</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="service-auto" checked> 自动刷新</label>
+    </div>
+    <div id="service-log-content" class="log-pre service-pre log-lines"></div>
+  </section>
+</main>
+
+<!-- 作业详情抽屉 -->
+<aside id="drawer" class="drawer">
+  <header class="drawer-head">
+    <h2>作业详情</h2>
+    <div class="drawer-id">
+      <span class="mono" id="drawer-title"></span>
+      <span class="badge" id="drawer-status"></span>
+    </div>
+    <button type="button" class="btn" id="drawer-close">关闭</button>
+  </header>
+  <div class="drawer-body">
+    <section>
+      <h3>概览</h3>
+      <p class="muted" id="drawer-vanished" hidden>作业已从列表消失(被删除或清扫),显示末次快照</p>
+      <div class="kv"><span>方法</span><span id="drawer-method"></span></div>
+      <div class="kv"><span>fidelity</span><span class="mono" id="drawer-fidelity"></span></div>
+      <div class="kv"><span>部件</span><span id="drawer-part"></span></div>
+      <div class="kv"><span>受理时间</span><span id="tl-created"></span></div>
+      <div class="kv"><span>开始时间</span><span id="tl-started"></span></div>
+      <div class="kv"><span>结束时间</span><span id="tl-finished"></span></div>
+    </section>
+    <section>
+      <h3>阶段进度</h3>
+      <table class="mini-table"><thead><tr><th>阶段</th><th>累计秒</th></tr></thead>
+        <tbody id="stages-body"></tbody></table>
+      <p class="muted" id="stages-empty">无阶段数据</p>
+    </section>
+    <section id="error-box" hidden>
+      <h3>错误</h3>
+      <div class="kv"><span>错误码</span><span class="mono" id="error-code"></span></div>
+      <div class="error-text" id="error-message"></div>
+    </section>
+    <section>
+      <h3>结果数值(results.csv)</h3>
+      <table class="mini-table"><thead><tr><th>标签</th><th>数值</th></tr></thead>
+        <tbody id="result-values"></tbody></table>
+      <p class="muted" id="result-empty">作业未成功,无结果数值</p>
+      <p class="error-text" id="result-error" hidden></p>
+    </section>
+    <section>
+      <h3>工件</h3>
+      <ul class="artifact-list" id="artifacts-list"></ul>
+    </section>
+    <section>
+      <h3>日志</h3>
+      <div class="toolbar">
+        <label>来源
+          <select id="log-source">
+            <option value="job.log" selected>job.log(状态事件)</option>
+            <option value="job.out">job.out(MAPDL 输出)</option>
+          </select>
+        </label>
+        <label>行数
+          <select id="log-tail">
+            <option value="200" selected>末 200 行</option>
+            <option value="1000">末 1000 行</option>
+            <option value="0">全文</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="log-follow" checked> 续追(运行中)</label>
+      </div>
+      <div id="log-content" class="log-pre log-lines"></div>
+    </section>
+  </div>
+</aside>
+</body>
+</html>
