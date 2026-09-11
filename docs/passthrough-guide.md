@@ -425,6 +425,9 @@ SET,LAST
 ```
 
 前端渲染动画 = 逐帧读 csv 数据 + 客户端插值(数据帧,不传视频/图片)。
+**消费侧怎么把帧变成 3D 回放(数据语义/渲染配方/各栈生态选项/实测坑)见
+`playback-handbook.md`;cube 型 three.js 参考实现见
+`examples/passthrough-demo/playback/`。**
 **坑:`*VWRITE` 字符字面量标签 ≤8 字符**,超长被 MAPDL 静默截断
 (写读两侧撞键、数据错位)。逐标签自查,别依赖"看起来写进去了"。
 

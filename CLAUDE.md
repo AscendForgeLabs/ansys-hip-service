@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 HIP 仿真**纯 MAPDL 转发器** — 面向 HIPForm 的 ANSYS/MAPDL 计算运输服务(FastAPI,独立进程部署)。`POST /sim/passthrough` 是**唯一**作业提交通道:上游上传 APDL 输入(.inp 及附属文件),本服务忠实执行、不负责任何仿真逻辑(结果 `fidelity: "passthrough"`,服务不背书物理内容);异步作业模式:提交(202)→ 轮询 `GET /jobs/{id}`(含 stages 阶段进度)→ 取结果/工件。仓库注释、文档、提交信息全部用中文。
 
-上游对接契约的唯一入口是 `docs/passthrough-guide.md`(`POST /uploads/apdl` 上传、`declared_outputs` 声明输出、`progress.csv` 阶段侧车、`results.csv` 结构化结果;示范工程在 `docs/examples/passthrough-demo/`)。
+上游对接契约的唯一入口是 `docs/passthrough-guide.md`(`POST /uploads/apdl` 上传、`declared_outputs` 声明输出、`progress.csv` 阶段侧车、`results.csv` 结构化结果;示范工程在 `docs/examples/passthrough-demo/`);消费侧三维回放手册在 `docs/playback-handbook.md`(帧数据语义/渲染配方/生态选项,含 `playback/` 参考实现)。
 
 **安全门槛**:passthrough = 任意 APDL 执行面(可读写文件、起系统命令),开关默认 `false`(`config/service.yaml`,环境变量 `HIP_SERVICE_PASSTHROUGH_ENABLED` 可覆盖),仅纯内网允许开启,公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。
 

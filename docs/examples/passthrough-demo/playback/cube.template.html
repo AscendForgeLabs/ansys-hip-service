@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>正方体逐步凹陷 3D 回放 — cube_dent(passthrough 数据帧)</title>
+<style>
+  html,body{margin:0;height:100%;background:#0e1116;color:#cfd8e3;
+    font:13px/1.5 "Noto Sans CJK SC","WenQuanYi Zen Hei",system-ui,sans-serif;overflow:hidden}
+  #view{position:absolute;inset:0}
+  .hud{position:absolute;background:rgba(14,17,22,.82);border:1px solid #2a3340;
+    border-radius:8px;padding:10px 14px;backdrop-filter:blur(4px)}
+  #panel{top:12px;left:12px;width:256px}
+  #panel h1{font-size:14px;margin:0 0 2px;color:#e8eef5}
+  #panel .sub{font-size:11px;color:#7d8a99;margin-bottom:8px}
+  .row{display:flex;align-items:center;gap:8px;margin:7px 0}
+  .row label{flex:0 0 62px;font-size:11px;color:#9aa7b5}
+  input[type=range]{flex:1;accent-color:#5ec962}
+  button{background:#1b2330;color:#cfd8e3;border:1px solid #2f3a49;border-radius:5px;
+    padding:3px 12px;cursor:pointer;font-size:12px}
+  button:hover{background:#26303f}
+  #stage{top:12px;right:12px;text-align:right}
+  #stage .big{font-size:22px;font-weight:600;color:#fde725}
+  #stage .lbl{font-size:11px;color:#7d8a99}
+  #stage .seg{font-size:13px;color:#5ec962;margin-top:2px}
+  #bar{bottom:12px;left:12px;right:12px;display:flex;gap:14px;align-items:center}
+  #bar .note{font-size:10px;color:#5d6a78;max-width:44%;text-align:right;margin-left:auto}
+  #cbar{width:120px;height:10px;border-radius:5px;
+    background:linear-gradient(90deg,#440154,#3b528b,#21918c,#5ec962,#fde725)}
+  #cbar-wrap{display:flex;flex-direction:column;font-size:9px;color:#7d8a99}
+  #tags{display:flex;gap:6px;flex-wrap:wrap}
+  .tag{font-size:10px;padding:1px 7px;border-radius:9px;background:#1b2330;
+    border:1px solid #2f3a49;color:#9aa7b5;cursor:pointer}
+  .tag.on{color:#fde725;border-color:#5ec962}
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div class="hud" id="panel">
+  <h1>正方体逐步凹陷 3D 回放</h1>
+  <div class="sub">cube_dent · 全三维实体网格(SOLID186)六面渲染<br>数据:passthrough 工件 frame_1..6.csv</div>
+  <div class="row"><label>压制进程</label><input id="timeline" type="range" min="0" max="6" step="0.002" value="0"></div>
+  <div class="row"><label>变形倍率</label><input id="scale" type="range" min="1" max="30" step="1" value="5">
+    <span id="scalev" style="font-size:11px;width:34px">×5</span></div>
+  <div class="row"><label>回放速度</label><input id="speed" type="range" min="2" max="20" step="1" value="8">
+    <span id="speedv" style="font-size:11px;width:46px">8 s/程</span></div>
+  <div class="row" style="gap:6px">
+    <button id="play">▶ 播放</button><button id="reset">复位视角</button>
+  </div>
+  <div class="row" id="tags">
+    <span class="tag on" id="tag-shell">外壳</span>
+    <span class="tag on" id="tag-wire">网格线</span>
+    <span class="tag on" id="tag-ghost">参考轮廓</span>
+    <span class="tag on" id="tag-punch">压头</span>
+  </div>
+  <div class="row" style="margin-bottom:0"><div id="cbar-wrap"><div id="cbar"></div>
+    <div style="display:flex;justify-content:space-between"><span>0</span><span>总位移 |u|</span><span id="cmax"></span></div>
+  </div></div>
+</div>
+
+<div class="hud" id="stage">
+  <div class="lbl">压深</div>
+  <div class="big"><span id="pv">0.00</span> mm</div>
+  <div class="seg" id="seg">MESH · t=0 s</div>
+  <div class="lbl" id="umax">max|u| = 0 mm</div>
+</div>
+
+<div class="hud" id="bar">
+  <span style="font-size:11px;color:#9aa7b5">拖动旋转 · 滚轮缩放</span>
+  <div class="note">SOLID186 · 1000 单元 · 4961 节点 · 顶面 4x4 mm 方形压头 6 段下压 0.3→1.8 mm(NLGEOM);
+    线弹性占位本构,变形倍率仅为可视化放大。求解:MAPDL v252 经 passthrough 通道(2026-09-11 真机 E2E)。</div>
+</div>
+
+<script src="./three.min.js"></script>
+<script>
+const DATA = __DATA__;
+const NF = DATA.meta.nseg;                       // 位移帧数;t=0 为零位移(装料)
+const SIDE = DATA.meta.side;
+const UXMAX = DATA.meta.colorMax;
+
+/* ---------- viridis 色带 ---------- */
+const STOPS = [[0x44,0x01,0x54],[0x3b,0x52,0x8b],[0x21,0x91,0x8c],[0x5e,0xc9,0x62],[0xfd,0xe7,0x25]];
+function cmap(v, out, o){
+  v = Math.max(0, Math.min(1, v)) * (STOPS.length - 1);
+  const i = Math.min(Math.floor(v), STOPS.length - 2), f = v - i;
+  const a = STOPS[i], b = STOPS[i+1];
+  out[o] = (a[0] + (b[0]-a[0])*f) / 255; out[o+1] = (a[1] + (b[1]-a[1])*f) / 255; out[o+2] = (a[2] + (b[2]-a[2])*f) / 255;
+}
+
+/* ---------- 场景 ---------- */
+const canvas = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1116);
+const camera = new THREE.PerspectiveCamera(42, 1, 1, 4000);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x30363f, 0.95));
+const dl = new THREE.DirectionalLight(0xffffff, 0.55); dl.position.set(0.6, 1, 0.8); scene.add(dl);
+const fl = new THREE.DirectionalLight(0xaebfd4, 0.35); fl.position.set(-0.7, 0.25, -0.6); scene.add(fl);  // 低角度补光:照亮凹坑内壁
+const group = new THREE.Group(); scene.add(group);
+
+/* ---- 共享顶点缓冲:6 个外壳面 + 网格线全部引用同一份 position/color ---- */
+const NV = DATA.vertBase.length / 3;
+const posAttr = new THREE.BufferAttribute(new Float32Array(NV*3), 3);
+const colAttr = new THREE.BufferAttribute(new Float32Array(NV*3), 3);
+const nrmAttr = new THREE.BufferAttribute(new Float32Array(DATA.vertNorm), 3);  // 静态面法线
+
+const faceMeshes = [], wireMeshes = [];
+DATA.faces.forEach(f => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", posAttr);
+  g.setAttribute("color", colAttr);
+  g.setAttribute("normal", nrmAttr);
+  g.setIndex(f.tris);
+  // Phong(逐像素光照):双面渲染时按 gl_FrontFacing 翻法线,凹坑内壁才有光;
+  // Lambert 是顶点光照,内壁会按背面变黑。shininess=0 + 黑高光 = Lambert 观感。
+  const mesh = new THREE.Mesh(g, new THREE.MeshPhongMaterial({vertexColors:true, side:THREE.DoubleSide, shininess:0, specular:0x000000}));
+  group.add(mesh); faceMeshes.push(mesh);
+
+  const wg = new THREE.BufferGeometry();
+  wg.setAttribute("position", posAttr);
+  wg.setIndex(f.wire);
+  const wire = new THREE.LineSegments(wg, new THREE.LineBasicMaterial({color:0x9db0c3, transparent:true, opacity:0.18}));
+  group.add(wire); wireMeshes.push(wire);
+});
+
+/* ---- 参考轮廓(未变形立方体 12 棱)---- */
+const ghost = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(SIDE, SIDE, SIDE)),
+  new THREE.LineDashedMaterial({color:0x5d6a78, dashSize:1.6, gapSize:1.2, transparent:true, opacity:0.6}));
+ghost.computeLineDistances();
+ghost.position.set(SIDE/2, SIDE/2, SIDE/2);
+group.add(ghost);
+
+/* ---- 压头(半透明方块,底面跟随压深,高度自适应:顶面始终露在立方体上方)---- */
+const PUNCH_W = 4, PUNCH_TOP = 4;
+const punch = new THREE.Mesh(
+  new THREE.BoxGeometry(PUNCH_W, 1, PUNCH_W),
+  new THREE.MeshLambertMaterial({color:0x8fa3b8, transparent:true, opacity:0.22}));
+group.add(punch);
+
+/* ---------- 交互:拖转 + 滚轮 ---------- */
+let yaw = 0.62, pitch = 0.95, dist = 95;
+const CX = SIDE/2, CY = SIDE/2, CZ = SIDE/2;
+function placeCamera(){
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  camera.position.set(CX + dist*cp*Math.cos(yaw), CY + dist*sp, CZ + dist*cp*Math.sin(yaw));
+  camera.lookAt(CX, CY, CZ);
+}
+let drag = null;
+canvas.addEventListener("mousedown", e => drag = [e.clientX, e.clientY]);
+addEventListener("mousemove", e => {
+  if (!drag) return;
+  yaw += (e.clientX - drag[0]) * 0.008; pitch = Math.max(-0.05, Math.min(1.35, pitch + (e.clientY - drag[1]) * 0.006));
+  drag = [e.clientX, e.clientY];
+});
+addEventListener("mouseup", () => drag = null);
+canvas.addEventListener("wheel", e => { e.preventDefault();
+  dist = Math.max(45, Math.min(400, dist * (e.deltaY > 0 ? 1.08 : 0.93))); }, {passive:false});
+document.getElementById("reset").onclick = () => { yaw = 0.62; pitch = 0.95; dist = 95; };
+
+/* ---------- 帧插值:t∈[0,NF];t=0 零位移,(0,1] 从零插到帧 1 ---------- */
+function segOf(t){
+  if (t <= 0) return null;
+  const tf = Math.min(t, NF);
+  const fi = Math.min(Math.floor(tf - 1e-9), NF - 1);   // 当前到达帧 0..NF-1
+  return fi <= 0 ? [0, tf] : [fi - 1, tf - fi];         // [基帧, 帧内比例]
+}
+const BASE = DATA.vertBase, FU = DATA.framesU;
+function depthAt(t){
+  const d = DATA.stages.depth, tf = Math.max(0, Math.min(t, NF));
+  const i = Math.min(Math.floor(tf), d.length - 2);
+  return d[i] + (d[i+1] - d[i]) * (tf - i);
+}
+
+function update(t, scale){
+  const seg = segOf(t);
+  const pos = posAttr.array, col = colAttr.array;
+  let uMax = 0;
+  for (let i = 0; i < NV; i++){
+    let ux = 0, uy = 0, uz = 0;
+    if (seg){
+      const a = FU[seg[0]], b = FU[seg[0]+1], f = seg[1], o = i*3;
+      ux = a[o]   + (b[o]   - a[o])   * f;
+      uy = a[o+1] + (b[o+1] - a[o+1]) * f;
+      uz = a[o+2] + (b[o+2] - a[o+2]) * f;
+    }
+    const u = Math.sqrt(ux*ux + uy*uy + uz*uz);
+    if (u > uMax) uMax = u;
+    const o = i*3;
+    pos[o]   = BASE[o]   + scale * ux;
+    pos[o+1] = BASE[o+1] + scale * uy;
+    pos[o+2] = BASE[o+2] + scale * uz;
+    cmap(u / UXMAX, col, o);
+  }
+  posAttr.needsUpdate = true; colAttr.needsUpdate = true;
+
+  const dep = depthAt(t);
+  const ph = scale * dep + PUNCH_TOP;          // 压头高度:坑底一直伸到顶面上方
+  punch.scale.y = ph;
+  punch.position.set(CX, SIDE - scale * dep + ph/2, CZ);
+
+  const k = Math.min(Math.round(t), DATA.stages.label.length - 1);
+  document.getElementById("pv").textContent = dep.toFixed(2);
+  document.getElementById("seg").textContent = DATA.stages.label[k] + " · t=" + DATA.stages.time[k] + " s";
+  document.getElementById("umax").textContent = "max|u| = " + uMax.toFixed(3) + " mm";
+}
+document.getElementById("cmax").textContent = UXMAX.toFixed(2) + " mm";
+
+/* ---------- 控件 ---------- */
+let playing = false, tNow = 0, lastTs = null;
+const timeline = document.getElementById("timeline");
+timeline.addEventListener("input", () => { tNow = +timeline.value; update(tNow, +scaleEl.value); });
+const scaleEl = document.getElementById("scale");
+scaleEl.addEventListener("input", () => {
+  document.getElementById("scalev").textContent = "×" + scaleEl.value;
+  update(tNow, +scaleEl.value);
+});
+const speedEl = document.getElementById("speed");
+speedEl.addEventListener("input", () =>
+  document.getElementById("speedv").textContent = speedEl.value + " s/程");
+const playBtn = document.getElementById("play");
+playBtn.onclick = () => { playing = !playing; playBtn.textContent = playing ? "⏸ 暂停" : "▶ 播放"; };
+document.getElementById("tag-shell").onclick = e => {
+  const v = !faceMeshes[0].visible; faceMeshes.forEach(m => m.visible = v); e.target.classList.toggle("on"); };
+document.getElementById("tag-wire").onclick = e => {
+  const v = !wireMeshes[0].visible; wireMeshes.forEach(m => m.visible = v); e.target.classList.toggle("on"); };
+document.getElementById("tag-ghost").onclick = e => {
+  ghost.visible = !ghost.visible; e.target.classList.toggle("on"); };
+document.getElementById("tag-punch").onclick = e => {
+  punch.visible = !punch.visible; e.target.classList.toggle("on"); };
+
+function resize(){
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize); resize();
+
+function loop(ts){
+  if (playing){
+    if (lastTs !== null){ tNow += NF / (+speedEl.value) * (ts - lastTs) / 1000; if (tNow > NF) tNow = 0; }
+    timeline.value = tNow;
+    update(tNow, +scaleEl.value);
+  }
+  lastTs = ts;
+  placeCamera();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+update(0, +scaleEl.value);
+const hm = location.hash.match(/t=([\d.]+)/);      // 支持 #t=秒 / #nopunch 直达(测试/分享用)
+if (hm){ tNow = Math.min(+hm[1], NF); timeline.value = tNow; update(tNow, +scaleEl.value); }
+const hPitch = location.hash.match(/pitch=([\d.]+)/);
+if (hPitch) pitch = +hPitch[1];
+const hScale = location.hash.match(/scale=([\d.]+)/);
+if (hScale){ scaleEl.value = hScale[1]; document.getElementById("scalev").textContent = "×" + hScale[1]; update(tNow, +hScale[1]); }
+if (location.hash.includes("nopunch")){
+  punch.visible = false;
+  document.getElementById("tag-punch").classList.remove("on");
+}
+if (location.hash.includes("debug")){            // 顶点级对账:最高 |u| 顶点的 pos/col
+  update(6, +scaleEl.value);                     // 用当前滑杆倍率(可被 #scale= 覆盖)
+  let li = 0, lu = -1;
+  for (let i = 0; i < NV; i++){
+    const o = i*3, u = Math.sqrt(FU[5][o]**2 + FU[5][o+1]**2 + FU[5][o+2]**2);
+    if (u > lu){ lu = u; li = i; }
+  }
+  const o = li*3, pos = posAttr.array, col = colAttr.array;
+  placeCamera();
+  camera.updateMatrixWorld(true);
+  camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+  const v3 = new THREE.Vector3(pos[o], pos[o+1], pos[o+2]).project(camera);
+  const sx = Math.round((v3.x + 1) / 2 * innerWidth), sy = Math.round((1 - v3.y) / 2 * innerHeight);
+  // 对该屏幕点做拾取:命中了哪个面网格/三角形/三顶点色
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(new THREE.Vector2(v3.x, v3.y), camera);
+  const hits = ray.intersectObjects(faceMeshes, false);
+  const hitInfo = hits.slice(0, 3).map(h => {
+    const t = h.face, p = t.a*3;
+    return {face: h.objectIndex ?? h.object?.uuid?.slice(-4), tri: [t.a, t.b, t.c],
+            col: [col[p], col[p+1], col[p+2]].map(v => +v.toFixed(3)),
+            nrm: [t.normal.x, t.normal.y, t.normal.z].map(v => +v.toFixed(2)),
+            dist: +h.distance.toFixed(1)};
+  });
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify({
+    seg: segOf(6), uxmax: UXMAX, nv: NV,
+    topVert: li, uMag: lu,
+    base: [BASE[o], BASE[o+1], BASE[o+2]],
+    frame6: [FU[5][o], FU[5][o+1], FU[5][o+2]],
+    pos: [pos[o].toFixed(2), pos[o+1].toFixed(2), pos[o+2].toFixed(2)],
+    col: [col[o].toFixed(3), col[o+1].toFixed(3), col[o+2].toFixed(3)],
+    screen: [sx, sy],
+    hits: hitInfo
+  });
+  document.body.innerHTML = ""; document.body.appendChild(pre);
+  throw new Error("debug halt");
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
