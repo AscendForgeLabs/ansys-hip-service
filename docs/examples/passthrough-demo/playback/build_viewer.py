@@ -68,8 +68,8 @@ def read_stage_data(art: Path) -> tuple[list[str], list[float], dict[str, float]
     return labels, times, values
 
 
-def detect_axis_lattice(coords: list[float], axis: str) -> tuple[float, float, int, list[float]]:
-    """单轴结构格检测:返回 (最小值, 单元边长, 每边单元数, 角点坐标表)。
+def detect_axis_lattice(coords: list[float], axis: str) -> tuple[float, int, list[float]]:
+    """单轴结构格检测:返回 (单元边长, 每边单元数, 角点坐标表)。
 
     hex20 检测口径:唯一坐标值均匀间距 g(=半单元边),角点 = g 的偶数倍处,
     棱中点 = 奇数倍处;角点数 = k+1、总点数 = 2k+1。不满足即报错退场。"""
@@ -85,7 +85,7 @@ def detect_axis_lattice(coords: list[float], axis: str) -> tuple[float, float, i
         raise SystemExit(
             f"轴 {axis} 不是 hex20 角点+棱中点形态(角点 {len(corners)} / 总 {len(uniq)});"
             f"线性单元或非规则网格见 docs/playback-handbook.md §3")
-    return 0.0, 2 * g, len(corners) - 1, corners
+    return 2 * g, len(corners) - 1, corners
 
 
 def main() -> int:
@@ -106,16 +106,15 @@ def main() -> int:
     nseg = len(frames)
     stages_labels, stages_times, results = read_stage_data(art)
 
-    # 包围盒与三轴结构格(以首帧初始构型为基准)
+    # 包围盒与三轴结构格(以首帧初始构型为基准;检测按"减去轴最小值"归零,
+    # 故只需各轴最小值)
     first = frames[0]
-    bbox = {ax: (min(v[i] for v in first.values()), max(v[i] for v in first.values()))
-            for i, ax in enumerate("xyz")}
+    lo_by_axis = {ax: min(v[i] for v in first.values()) for i, ax in enumerate("xyz")}
     lat = {}
     for i, ax in enumerate("xyz"):
-        lo, hi = bbox[ax]
-        g_min, cell, k, corners = detect_axis_lattice(
-            [v[i] - lo for v in first.values()], ax)
-        lat[ax] = (lo, cell, k, corners)
+        cell, k, corners = detect_axis_lattice(
+            [v[i] - lo_by_axis[ax] for v in first.values()], ax)
+        lat[ax] = (lo_by_axis[ax], cell, k, corners)
     side = {ax: lat[ax][1] * lat[ax][2] for ax in "xyz"}   # 每轴边长
 
     # 面表:(固定轴, 网格轴 a, 网格轴 b);外法线 = a×b 或其反

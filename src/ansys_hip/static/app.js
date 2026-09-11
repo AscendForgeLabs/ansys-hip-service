@@ -19,6 +19,7 @@ const MAX_RENDER_LINES = 2000; // 大日志渲染上限:只渲染末 N 行,防 D
 const PIN_TO_BOTTOM_PX = 24; // 距底小于该值(像素)视为"钉在底部"
 
 // ===== 状态(不可变更新:一律整体替换,不改原对象)=====
+// 定时器句柄与请求序号是模块级可变引用(非视图状态),不进 state
 let state = {
   health: null,
   jobs: [],
@@ -35,9 +36,9 @@ let state = {
     tail: 200, // 200 | 1000 | 0(0 = 全文,不加 tail 参数)
     follow: true,
   },
-  pollTimer: null,
-  logTimer: null,
 };
+let pollTimer = null;
+let logTimer = null;
 
 // ===== DOM 小工具 =====
 function $(id) {
@@ -223,8 +224,12 @@ function renderHealth(health) {
 }
 
 // ===== 作业表渲染 =====
+function statusMeta(status) {
+  return STATUS_META[status] || { label: status, cls: "" };
+}
+
 function statusCell(status) {
-  const meta = STATUS_META[status] || { label: status, cls: "" };
+  const meta = statusMeta(status);
   const cell = el("td");
   cell.appendChild(el("span", "badge " + meta.cls, meta.label));
   return cell;
@@ -273,7 +278,7 @@ function renderJobs() {
 
 // ===== 详情抽屉:静态骨架填充 =====
 function renderStatusInto(node, status) {
-  const meta = STATUS_META[status] || { label: status, cls: "" };
+  const meta = statusMeta(status);
   node.textContent = meta.label;
   node.className = "badge " + meta.cls;
 }
@@ -368,10 +373,13 @@ async function loadResult(job) {
   }
 }
 
+function artifactsUrl(job) {
+  return job.artifacts_url || "/jobs/" + encodeURIComponent(job.id) + "/artifacts";
+}
+
 function appendArtifactLink(list, job, name) {
   const link = el("a", null, name);
-  link.href = (job.artifacts_url || "/jobs/" + encodeURIComponent(job.id) + "/artifacts")
-    + "/" + encodeURIComponent(name);
+  link.href = artifactsUrl(job) + "/" + encodeURIComponent(name);
   const item = el("li");
   item.appendChild(link);
   list.appendChild(item);
@@ -381,7 +389,7 @@ async function loadArtifacts(job) {
   const list = $("artifacts-list");
   list.replaceChildren(el("li", "muted", "加载中…"));
   try {
-    const names = await fetchJson(job.artifacts_url || "/jobs/" + encodeURIComponent(job.id) + "/artifacts");
+    const names = await fetchJson(artifactsUrl(job));
     list.replaceChildren();
     if (!Array.isArray(names) || names.length === 0) {
       list.appendChild(el("li", "muted", "无工件"));
@@ -408,7 +416,18 @@ function isPinnedToBottom(box) {
   return box.scrollHeight - box.scrollTop - box.clientHeight <= PIN_TO_BOTTOM_PX;
 }
 
-async function fetchDrawerLog() {
+// 量测→渲染→条件滚动:替换 DOM 前先记下旧视图是否钉底,续追刷新不打扰
+// 上翻阅读历史的用户。stick 意图显式声明,不靠盒子几何副作用推断:
+//   true = 新视图无条件落底(首开/切源/切档)
+//   "auto" = 原本钉底才落底(轮询续追)
+//   false = 不滚动(错误覆写)
+function renderLogPinned(box, text, kind, stick) {
+  const wasPinned = isPinnedToBottom(box);
+  renderLogLines(box, text, kind);
+  if (stick === true || (stick === "auto" && wasPinned)) box.scrollTop = box.scrollHeight;
+}
+
+async function fetchDrawerLog(stick = "auto") {
   const drawer = state.drawer;
   if (!drawer.job || !drawer.jobId) return;
   const seq = ++drawerLogSeq;
@@ -416,14 +435,10 @@ async function fetchDrawerLog() {
   try {
     const text = await fetchText(buildLogUrl(drawer.job, drawer.source, drawer.tail));
     if (seq !== drawerLogSeq || state.drawer.jobId !== jobId) return;
-    const box = $("log-content");
-    // 先量旧内容的位置再替换:用户上翻阅读历史时不被轮询拽回底部
-    const wasPinned = isPinnedToBottom(box);
-    renderLogLines(box, text, "job");
-    if (drawer.follow && wasPinned) box.scrollTop = box.scrollHeight; // 续追钉底
+    renderLogPinned($("log-content"), text, "job", drawer.follow ? stick : false);
   } catch (err) {
     if (seq !== drawerLogSeq || state.drawer.jobId !== jobId) return;
-    renderLogLines($("log-content"), "日志加载失败:" + err.code + ":" + err.message, "job");
+    renderLogPinned($("log-content"), "日志加载失败:" + err.code + ":" + err.message, "job", false);
   }
 }
 
@@ -435,12 +450,11 @@ function syncLogTimer() {
     drawer.jobId && drawer.follow && drawer.listed &&
     drawer.job && drawer.job.status === "running"
   );
-  if (shouldFollow && state.logTimer === null) {
-    const handle = setInterval(fetchDrawerLog, LOG_FOLLOW_MS);
-    state = { ...state, logTimer: handle };
-  } else if (!shouldFollow && state.logTimer !== null) {
-    clearInterval(state.logTimer);
-    state = { ...state, logTimer: null };
+  if (shouldFollow && logTimer === null) {
+    logTimer = setInterval(fetchDrawerLog, LOG_FOLLOW_MS);
+  } else if (!shouldFollow && logTimer !== null) {
+    clearInterval(logTimer);
+    logTimer = null;
   }
 }
 
@@ -466,7 +480,7 @@ function openDrawer(jobId) {
     loadResult(state.drawer.job);
     loadArtifacts(state.drawer.job);
   }
-  fetchDrawerLog();
+  fetchDrawerLog(true); // 新视图显式落底(不依赖加载占位符的几何副作用)
   syncLogTimer();
 }
 
@@ -489,12 +503,10 @@ async function refreshServiceLog() {
     const text = await fetchText(url);
     if (seq !== serviceLogSeq) return;
     // 自动刷新只跟随"原本就在底部"的视图:上翻阅读历史不被拽回最新
-    const wasPinned = isPinnedToBottom(box);
-    renderLogLines(box, text, "service");
-    if (wasPinned) box.scrollTop = box.scrollHeight;
+    renderLogPinned(box, text, "service", "auto");
   } catch (err) {
     if (seq !== serviceLogSeq) return;
-    renderLogLines(box, "服务日志加载失败:" + err.code + ":" + err.message, "service");
+    renderLogPinned(box, "服务日志加载失败:" + err.code + ":" + err.message, "service", false);
   }
 }
 
@@ -537,27 +549,36 @@ async function refreshJobs() {
   syncDrawerFromJobs();
 }
 
+let pollInFlight = false;
+
 async function pollOnce() {
-  // 永不抛出:轮询定时器不能因单次失败死掉
-  const tasks = [refreshHealth()];
-  if (state.activeTab === "jobs") tasks.push(refreshJobs());
-  if (state.activeTab === "service" && state.serviceAuto) tasks.push(refreshServiceLog());
-  const results = await Promise.allSettled(tasks);
-  const failure = results.find((item) => item.status === "rejected");
-  if (failure) showError(failure.reason.message);
-  else clearError();
+  // 在途守卫:请求慢于轮询间隔时跳过本轮,防 /jobs 全目录扫描堆叠、
+  // 慢的旧响应后到覆盖新数据(与日志层的请求序号守卫同目的)
+  if (pollInFlight) return;
+  pollInFlight = true;
+  try {
+    // 永不抛出:轮询定时器不能因单次失败死掉
+    const tasks = [refreshHealth()];
+    if (state.activeTab === "jobs") tasks.push(refreshJobs());
+    if (state.activeTab === "service" && state.serviceAuto) tasks.push(refreshServiceLog());
+    const results = await Promise.allSettled(tasks);
+    const failure = results.find((item) => item.status === "rejected");
+    if (failure) showError(failure.reason.message);
+    else clearError();
+  } finally {
+    pollInFlight = false;
+  }
 }
 
 function restartPollTimer() {
-  if (state.pollTimer !== null) {
-    clearInterval(state.pollTimer);
-    state = { ...state, pollTimer: null };
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
   }
   if (!state.autoRefresh) return;
-  const handle = setInterval(() => {
+  pollTimer = setInterval(() => {
     pollOnce();
   }, state.intervalMs);
-  state = { ...state, pollTimer: handle };
 }
 
 // ===== tab 切换 =====
@@ -608,12 +629,12 @@ function bindDrawerEvents() {
   $("log-source").addEventListener("change", (event) => {
     state = { ...state, drawer: { ...state.drawer, source: event.target.value } };
     showLogLoading($("log-content"), "日志加载中…"); // 即时反馈:请求在途时先换掉旧源内容
-    fetchDrawerLog();
+    fetchDrawerLog(true); // 切源 = 新视图,显式落底
   });
   $("log-tail").addEventListener("change", (event) => {
     state = { ...state, drawer: { ...state.drawer, tail: Number(event.target.value) } };
     showLogLoading($("log-content"), "日志加载中…");
-    fetchDrawerLog();
+    fetchDrawerLog(true); // 切档 = 新视图,显式落底
   });
   $("log-follow").addEventListener("change", (event) => {
     state = { ...state, drawer: { ...state.drawer, follow: event.target.checked } };

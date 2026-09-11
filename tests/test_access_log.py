@@ -29,17 +29,6 @@ from ansys_hip.api import create_app
 from ansys_hip.settings import AccessLogConfig, Settings
 
 
-def access_settings(settings_factory, tmp_path: Path, subdir: str) -> Settings:
-    """测试 Settings:访问日志文件指到 tmp 子目录(每个用例独立文件)。"""
-    return settings_factory().model_copy(
-        update={
-            "access_log": AccessLogConfig(
-                file=str(tmp_path / subdir / "access.log")
-            )
-        }
-    )
-
-
 # ---------------------------------------------------------------------------
 # 1. 配置节
 # ---------------------------------------------------------------------------
@@ -70,30 +59,26 @@ def test_settings_derives_access_log_path(tmp_path: Path) -> None:
 
 def test_health_request_logged(settings_factory, tmp_path: Path) -> None:
     """/health 轮询也一字不漏:方法/路径/协议/状态码齐备。"""
-    settings = access_settings(settings_factory, tmp_path, "a")
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings_factory())) as client:
         response = client.get("/health")
         assert response.status_code == 200
-    log_file = tmp_path / "a" / "access.log"
-    content = log_file.read_text(encoding="utf-8")
+    content = (tmp_path / "logs" / "access.log").read_text(encoding="utf-8")
     assert '"GET /health HTTP/' in content
     assert " 200 " in content
 
 
 def test_404_request_logged(settings_factory, tmp_path: Path) -> None:
     """404(路由未命中)同样记录(全量口径,不挑状态码)。"""
-    settings = access_settings(settings_factory, tmp_path, "a")
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings_factory())) as client:
         assert client.get("/no-such-path").status_code == 404
-    content = (tmp_path / "a" / "access.log").read_text(encoding="utf-8")
+    content = (tmp_path / "logs" / "access.log").read_text(encoding="utf-8")
     assert '"GET /no-such-path HTTP/' in content
     assert " 404 " in content
 
 
 def test_unhandled_exception_logged_as_500(settings_factory, tmp_path: Path) -> None:
     """未处理异常先留痕 500 再上抛(由全局 Exception handler 渲染响应体)。"""
-    settings = access_settings(settings_factory, tmp_path, "a")
-    app = create_app(settings)
+    app = create_app(settings_factory())
 
     @app.get("/boom")
     def boom() -> dict[str, str]:
@@ -102,7 +87,7 @@ def test_unhandled_exception_logged_as_500(settings_factory, tmp_path: Path) -> 
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.get("/boom")
         assert response.status_code == 500
-    content = (tmp_path / "a" / "access.log").read_text(encoding="utf-8")
+    content = (tmp_path / "logs" / "access.log").read_text(encoding="utf-8")
     assert '"GET /boom HTTP/' in content
     assert " 500 " in content
 
@@ -110,8 +95,7 @@ def test_unhandled_exception_logged_as_500(settings_factory, tmp_path: Path) -> 
 def test_cancelled_request_logged_as_499(settings_factory, tmp_path: Path) -> None:
     """客户端断连(asyncio.CancelledError 是 BaseException,except Exception
     接不住)单独留痕 499 后原样上抛 — 直调 dispatch 钉住该分支。"""
-    settings = access_settings(settings_factory, tmp_path, "a")
-    create_app(settings)  # 已把访问日志 logger 重绑到 tmp 文件
+    create_app(settings_factory())  # 已把访问日志 logger 重绑到 tmp 文件
     scope = {
         "type": "http", "method": "GET", "path": "/cancelled",
         "headers": [], "query_string": b"", "http_version": "1.1",
@@ -126,17 +110,16 @@ def test_cancelled_request_logged_as_499(settings_factory, tmp_path: Path) -> No
     dispatch = make_access_log_middleware()
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(dispatch(request, cancelled_call_next))
-    content = (tmp_path / "a" / "access.log").read_text(encoding="utf-8")
+    content = (tmp_path / "logs" / "access.log").read_text(encoding="utf-8")
     assert '"GET /cancelled HTTP/' in content
     assert " 499 " in content
 
 
 def test_query_string_logged(settings_factory, tmp_path: Path) -> None:
     """完整路径含 query(?tail=1)——面板排查轮询问题时按参数定位。"""
-    settings = access_settings(settings_factory, tmp_path, "a")
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings_factory())) as client:
         client.get("/service/log?tail=1")
-    content = (tmp_path / "a" / "access.log").read_text(encoding="utf-8")
+    content = (tmp_path / "logs" / "access.log").read_text(encoding="utf-8")
     assert '"GET /service/log?tail=1 HTTP/' in content
 
 
@@ -146,8 +129,7 @@ def test_query_string_logged(settings_factory, tmp_path: Path) -> None:
 
 def test_service_log_returns_content(settings_factory, tmp_path: Path) -> None:
     """缺省全文:此前每个请求各占一行,全部可见。"""
-    settings = access_settings(settings_factory, tmp_path, "a")
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings_factory())) as client:
         client.get("/health")
         client.get("/health")
         response = client.get("/service/log")
@@ -158,8 +140,7 @@ def test_service_log_returns_content(settings_factory, tmp_path: Path) -> None:
 
 def test_service_log_tail_truncates(settings_factory, tmp_path: Path) -> None:
     """?tail=N 只取最后 N 行(端点读文件先于自身请求被记录,断言按前请求)。"""
-    settings = access_settings(settings_factory, tmp_path, "a")
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings_factory())) as client:
         client.get("/health")          # 行 1
         client.get("/jobs")            # 行 2(末行)
         response = client.get("/service/log?tail=1")
@@ -170,8 +151,7 @@ def test_service_log_tail_truncates(settings_factory, tmp_path: Path) -> None:
 
 def test_service_log_empty_before_any_request(settings_factory, tmp_path: Path) -> None:
     """尚无请求 → 空文本(不 500、不以缺文件报错)。"""
-    settings = access_settings(settings_factory, tmp_path, "a")
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings_factory())) as client:
         response = client.get("/service/log")
     assert response.status_code == 200
     assert response.text == ""
@@ -185,8 +165,15 @@ def test_repeated_create_app_rebinds_single_handler(
     settings_factory, tmp_path: Path
 ) -> None:
     """第二个 app 的请求写进新文件;logger 恰一个 handler 指向新路径。"""
-    first = access_settings(settings_factory, tmp_path, "first")
-    second = access_settings(settings_factory, tmp_path, "second")
+
+    # 本用例需要在同一测试内两个不同日志文件,显式覆盖 conftest 默认隔离
+    def settings_writing_to(subdir: str) -> Settings:
+        return settings_factory().model_copy(
+            update={"access_log": AccessLogConfig(file=str(tmp_path / subdir / "access.log"))}
+        )
+
+    first = settings_writing_to("first")
+    second = settings_writing_to("second")
     file_one = tmp_path / "first" / "access.log"
     file_two = tmp_path / "second" / "access.log"
 

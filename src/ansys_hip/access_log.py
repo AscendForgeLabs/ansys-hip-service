@@ -33,11 +33,12 @@ from fastapi import Request, Response
 from .settings import Settings
 
 ACCESS_LOG_LOGGER_NAME = "ansys_hip.access"
+# 模块级绑定同一单例:getLogger 每次调用带管理器锁,热路径(每请求)免重复查找
+access_logger = logging.getLogger(ACCESS_LOG_LOGGER_NAME)
 
 
 def configure_access_logging(settings: Settings) -> logging.Logger:
     """配置访问日志 logger(每次调用重绑到 settings 的文件,不累积 handler)。"""
-    access_logger = logging.getLogger(ACCESS_LOG_LOGGER_NAME)
     access_logger.setLevel(logging.INFO)
     access_logger.propagate = False
     for stale in list(access_logger.handlers):
@@ -85,7 +86,7 @@ def _log_access(request: Request, status_code: int, elapsed_s: float) -> None:
     query = request.scope.get("query_string", b"").decode("latin-1")
     target = f"{request.url.path}?{query}" if query else request.url.path
     protocol = request.scope.get("http_version", "?")
-    logging.getLogger(ACCESS_LOG_LOGGER_NAME).info(
+    access_logger.info(
         '[%s] %s "%s %s HTTP/%s" %d %.1fms',
         datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         peer,

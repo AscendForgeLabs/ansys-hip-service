@@ -81,6 +81,19 @@ def run_passthrough(params: PassthroughParams, ctx: RunContext) -> dict:
     return result
 
 
+def declared_output_overlap(params: PassthroughParams) -> list[str]:
+    """声明输出与入口/附属文件 basename 的交集(排序)。
+
+    输入会按原名复制进作业目录根部(见 _stage_inputs),同名声明输出会被
+    这份拷贝"自我满足",缺件检查被短路(MAPDL 零产出也算 succeeded)→
+    交集非空即应拒绝。供 API 边界做 400 fail-fast:该不变量是 staging
+    复制行为的推论,随本模块演化,不散落在 API 层重推。
+    """
+    input_names = {Path(params.entry_file).name}
+    input_names.update(Path(path).name for path in params.extra_files)
+    return sorted(input_names.intersection(params.declared_outputs))
+
+
 def _stage_inputs(params: PassthroughParams, job_dir: Path) -> tuple[Path, list[Path]]:
     """校验入口/附属文件 → 按原名复制进 job_dir 根部;返回 (入口, 附属列表) 的目标路径。
 

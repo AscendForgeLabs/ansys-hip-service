@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from ansys_hip.api import create_app
 from ansys_hip.queue import JobQueue
+from ansys_hip.results import PROGRESS_FILENAME
 
 # 复用既有测试工具(tests/ 在 sys.path;假内核/提交/轮询/开通道助手/终态常量)
 from test_api_core import (
@@ -197,6 +198,32 @@ def test_restart_keeps_history_queryable(settings_factory, fake_executors) -> No
         result = client.get(f"/jobs/{accepted['id']}/result")
         assert result.status_code == 200, result.text
         assert result.json()["artifacts"] == ["curve.csv"]
+
+
+def test_historic_stages_projected_from_progress_csv(settings_factory) -> None:
+    """历史作业的 stages 同样读时投影 progress.csv(与活跃路径单一事实源);
+    state.json 旧档里遗留的 stages 键被投影值覆盖,不作为第二事实源。"""
+    settings = enabled_settings(settings_factory)
+    make_history_job(settings.jobs_root, "hist-stages")
+    (settings.jobs_root / "hist-stages" / PROGRESS_FILENAME).write_text(
+        "HEAT,3600\nHOLD,7200\n", encoding="utf-8"
+    )
+    # 旧档(stages 曾随状态迁移归档的年代)残留的陈旧帧:必须被投影覆盖
+    state_path = settings.jobs_root / "hist-stages" / "state.json"
+    stale = json.loads(state_path.read_text(encoding="utf-8"))
+    stale["stages"] = [{"label": "STALE", "time_s": 1.0}]
+    state_path.write_text(
+        json.dumps(stale, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    with TestClient(create_app(settings)) as client:
+        detail = client.get("/jobs/hist-stages")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["stages"] == [
+            {"label": "HEAT", "time_s": 3600.0},
+            {"label": "HOLD", "time_s": 7200.0},
+        ]
+        listed = client.get("/jobs").json()
+        assert listed[0]["stages"] == detail.json()["stages"]
 
 
 def test_historic_failed_result_returns_409_with_error(settings_factory) -> None:

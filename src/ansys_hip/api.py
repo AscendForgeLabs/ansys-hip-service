@@ -9,7 +9,6 @@ jobs(作业管理)/ uploads(APDL 上传)。
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -89,7 +88,8 @@ _PANEL_DIR = Path(__file__).resolve().parent / "static"
 APDL_UPLOAD_SUFFIXES = frozenset({".inp", ".cdb", ".mac", ".csv", ".txt"})
 UPLOAD_ID_TOKEN_BYTES = 6
 UPLOAD_CHUNK_BYTES = 1024 * 1024
-# 单文件上传字节上限(防未鉴权磁盘填充;.cdb 大网格留足余量)
+# 单文件上传字节上限(防未鉴权磁盘填充;.cdb 大网格留足余量)。
+# 刻意不入 service.yaml:这是代码级护栏,不随部署配置放宽
 MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 LOG_TAIL_MAX_LINES = 10_000
 ARTIFACT_FORBIDDEN_PATTERNS = ("/", "\\", "..")
@@ -366,6 +366,16 @@ def _sim_router(settings: Settings, queue: JobQueue) -> APIRouter:
     return router
 
 
+def _require_passthrough_enabled(settings: Settings) -> None:
+    """passthrough 直通关闸(提交与上传两面共用的 403 门控与文案)。"""
+    if not settings.passthrough.enabled:
+        raise ApiError(
+            403, "PASSTHROUGH_DISABLED",
+            "直通通道未开启(config/service.yaml passthrough.enabled=false;"
+            "安全前提:开启即暴露任意 APDL 执行面)",
+        )
+
+
 def _submit(
     spec: registry.MethodSpec,
     inline_params: dict[str, Any] | None,
@@ -378,12 +388,8 @@ def _submit(
     503 下线 → 501 未实现 → 400 参数(passthrough 随后附加上传目录限定);
     手写路由的"未知方法"在路由匹配层就不可达,由泛化兜底 404。
     """
-    if spec.name == registry.PASSTHROUGH_METHOD and not settings.passthrough.enabled:
-        raise ApiError(
-            403, "PASSTHROUGH_DISABLED",
-            "直通通道未开启(config/service.yaml passthrough.enabled=false;"
-            "安全前提:开启即暴露任意 APDL 执行面)",
-        )
+    if spec.name == registry.PASSTHROUGH_METHOD:
+        _require_passthrough_enabled(settings)
     if spec.name in settings.methods.disabled:
         raise ApiError(
             503, "METHOD_DISABLED",
@@ -445,9 +451,11 @@ def _validate_passthrough_uploads(params: PassthroughParams, settings: Settings)
                 f"{label} 必须位于上传目录内(先经 POST /uploads/apdl 上传): {path_text}",
             )
     # 声明输出与输入同名会被复制进根部的输入"自我满足",缺件检查被短路
-    # (MAPDL 零产出也算 succeeded)→ 显式拒绝
-    input_names = {Path(path_text).name for _, path_text in labeled}
-    overlapped = sorted(input_names.intersection(params.declared_outputs))
+    # (MAPDL 零产出也算 succeeded)→ 显式拒绝;交集计算由内核模块导出
+    # (与 _stage_inputs 的 basename 复制语义同源,懒加载同 registry 内核口径)
+    from .kernels.passthrough import declared_output_overlap  # noqa: PLC0415
+
+    overlapped = declared_output_overlap(params)
     if overlapped:
         raise ApiError(
             400, "INVALID_PARAMS",
@@ -471,9 +479,13 @@ def _validation_summary(exc: ValidationError) -> str:
 def _jobs_router(queue: JobQueue) -> APIRouter:
     router = APIRouter()
 
-    def require_job(job_id: str) -> JobSnapshot:
-        """取作业快照(内存实时;服务重启后回退盘上历史只读视图)。"""
-        snapshot = queue.snapshot(job_id)
+    def require_job(job_id: str, *, include_stages: bool = True) -> JobSnapshot:
+        """取作业快照(内存实时;服务重启后回退盘上历史只读视图)。
+
+        include_stages=False:不需要 stages 的端点(日志/工件/结果/删除)
+        跳过 progress.csv 的读盘与逐行解析。
+        """
+        snapshot = queue.snapshot(job_id, include_stages=include_stages)
         if snapshot is None:
             raise ApiError(
                 404, "JOB_NOT_FOUND",
@@ -507,7 +519,7 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         ),
     ) -> PlainTextResponse:
         """job.log / job.out 全文;?tail=N 只取最后 N 行。"""
-        snapshot = require_job(job_id)
+        snapshot = require_job(job_id, include_stages=False)
         if source not in LOG_SOURCE_WHITELIST:
             raise ApiError(
                 400, "INVALID_PARAMS",
@@ -524,9 +536,9 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
             409: {"model": ErrorBody, "description": "未完成/已取消/已失败,无结果"},
         },
     )
-    def get_job_result(job_id: str = PathParam(description="作业 ID")) -> JSONResponse:
+    def get_job_result(job_id: str = PathParam(description="作业 ID")) -> Response:
         """内核返回的结果 JSON;仅 succeeded 状态可取。"""
-        snapshot = require_job(job_id)
+        snapshot = require_job(job_id, include_stages=False)
         if snapshot.state.status in (JobStatusEnum.PENDING, JobStatusEnum.RUNNING):
             raise ApiError(
                 409, "RESULT_NOT_READY",
@@ -542,7 +554,11 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         result_path = snapshot.job_dir / RESULT_FILENAME
         if not result_path.is_file():
             raise ApiError(500, "INTERNAL", f"result.json 缺失: {result_path}")
-        return JSONResponse(content=json.loads(result_path.read_text(encoding="utf-8")))
+        # 已落盘的 result.json 原样直通,省一轮 parse→serialize(纯搬运)
+        return Response(
+            content=result_path.read_text(encoding="utf-8"),
+            media_type="application/json",
+        )
 
     @router.get(
         "/{job_id}/artifacts",
@@ -552,7 +568,7 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
     )
     def list_artifacts(job_id: str = PathParam(description="作业 ID")) -> list[str]:
         """作业 artifacts/ 目录内的工件文件名(按名排序),供 /artifacts/{name} 下载。"""
-        snapshot = require_job(job_id)
+        snapshot = require_job(job_id, include_stages=False)
         artifacts_dir = snapshot.job_dir / ARTIFACTS_DIRNAME
         if not artifacts_dir.is_dir():
             return []
@@ -571,7 +587,7 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         name: str = PathParam(description="工件文件名(取自 GET /jobs/{id}/artifacts)"),
     ) -> FileResponse:
         """下载作业 artifacts/ 目录内的工件(名称禁止路径分隔符与 '..')。"""
-        snapshot = require_job(job_id)
+        snapshot = require_job(job_id, include_stages=False)
         artifact_path = _resolve_artifact_path(snapshot.job_dir, name)
         return FileResponse(artifact_path, filename=name)
 
@@ -584,7 +600,7 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
     def delete_job(job_id: str = PathParam(description="作业 ID")) -> Response:
         """pending/running 先取消(运行中会防御性终止内核),再清理作业目录
         (含服务重启后的盘上历史作业目录)。"""
-        snapshot = require_job(job_id)
+        snapshot = require_job(job_id, include_stages=False)
         if snapshot.state.status in ACTIVE_STATUSES:
             queue.cancel(job_id)
         queue.remove(job_id)
@@ -641,12 +657,7 @@ def _uploads_router(settings: Settings) -> APIRouter:
         `POST /sim/passthrough` 的 entry_file / extra_files 引用(白名单只收
         MAPDL 文本类输入,可执行/二进制格式拒绝)。与提交端点同受
         passthrough 开关门控(关闭时 403,不留旁路上传面)。"""
-        if not settings.passthrough.enabled:
-            raise ApiError(
-                403, "PASSTHROUGH_DISABLED",
-                "直通通道未开启,上传端点一并拒绝"
-                "(config/service.yaml passthrough.enabled=false)",
-            )
+        _require_passthrough_enabled(settings)
         return await _accept_upload(file, uploads_root, APDL_UPLOAD_SUFFIXES, kind="APDL")
 
     return router

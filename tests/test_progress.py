@@ -24,7 +24,8 @@ from ansys_hip.api import create_app
 from ansys_hip.results import PROGRESS_FILENAME, parse_progress_csv
 from ansys_hip.schemas import JobStage
 
-# 复用 passthrough 测试工具(tests/ 在 sys.path;开通道的 Settings 与上传助手)
+# 复用既有测试工具(tests/ 在 sys.path;提交助手 + 开通道的 Settings 与上传助手)
+from test_api_core import submit
 from test_passthrough import enabled_settings, upload_apdl
 
 POLL_INTERVAL_S = 0.02
@@ -178,15 +179,11 @@ def wait_for_terminal(client: TestClient, job_id: str) -> dict[str, Any]:
 
 class TestQueueProjection:
     @staticmethod
-    def _submit_sidecar_job(client: TestClient, params_extra: dict[str, Any] | None = None):
-        """经 passthrough 通道提交作业(上传 entry 后 POST /sim/passthrough)。"""
+    def _submit_sidecar_job(client: TestClient) -> dict[str, Any]:
+        """经 passthrough 通道提交作业(上传 entry 后复用 submit 助手断言 202)。"""
         entry = upload_apdl(client, "demo.inp")
         params = {"entry_file": entry, "declared_outputs": ["results.csv"]}
-        if params_extra:
-            params.update(params_extra)
-        response = client.post("/sim/passthrough", json={"params": params})
-        assert response.status_code == 202, response.text
-        return response.json()
+        return submit(client, "passthrough", {"params": params})
 
     def test_running_and_terminal_reflect_sidecar(self, settings_factory, fake_executors):
         # Arrange:running 期间可见首帧(实时),终态保留末帧快照

@@ -2,7 +2,8 @@
 
 - 并发度 = settings.queue.max_concurrent(默认 1,单许可),每并发一个工作协程;
 - 同步内核经 asyncio.to_thread 在线程池执行,超过 job_timeout_s → TIMEOUT;
-- 作业目录 var/jobs/<id>/:state.json(JobState 全字段+resolved_params)、
+- 作业目录 var/jobs/<id>/:state.json(JobState 除 stages 外全字段+resolved_params;
+  stages 不落盘,一律读时投影 progress.csv)、
   resolved-params.json、result.json(成功后)、artifacts/(内核工件)、job.log(状态事件);
 - 异常映射:KernelError→其 code/message;超时→TIMEOUT;其他 Exception→INTERNAL;
 - 取消:pending 直接置 cancelled;running 先防御性调用 ansys_hip.runner.cancel_job
@@ -95,9 +96,8 @@ class JobQueue:
     async def start(self) -> None:
         """恢复遗留作业、清扫超期目录,并启动 max_concurrent 个工作协程。"""
         self._stopping = False
-        self._revive_interrupted_jobs()
         retention_days = self._settings.storage.retention_days
-        _sweep_expired_jobs(self._jobs_root, retention_days)
+        _recover_and_sweep_jobs(self._jobs_root, retention_days)
         _sweep_expired_uploads(self._settings.uploads_root, retention_days)
         worker_count = max(1, self._settings.queue.max_concurrent)
         self._workers = [
@@ -158,17 +158,13 @@ class JobQueue:
         self._queue.put_nowait(job_id)
         return record
 
-    def get(self, job_id: str) -> JobRecord | None:
-        """按 ID 取作业记录;不存在返回 None。"""
-        return self._jobs.get(job_id)
-
-    def state(self, record: JobRecord) -> JobState:
+    def state(self, record: JobRecord, *, include_stages: bool = True) -> JobState:
         """JobState 快照(含标准子资源 URL)。
 
         stages 为读时投影:GET 组装响应时解析 job_dir 根的 progress.csv 侧车,
-        无后台轮询协程、无状态迁移(状态迁移落盘 state.json 时会经本方法附带
-        一份当时的 stages 快照,仅归档,无人消费)— 文件不存在(尚无侧车)
-        自然得 None;终态后文件在盘上保留,快照即末帧。
+        无后台轮询协程、无状态迁移 — 文件不存在(尚无侧车)自然得 None;
+        终态后文件在盘上保留,快照即末帧。include_stages=False 供不需要
+        stages 的端点(日志/工件/结果/删除)跳过这次读盘与逐行解析。
         """
         return JobState(
             id=record.id,
@@ -183,18 +179,27 @@ class JobQueue:
             log_url=f"/jobs/{record.id}/log",
             result_url=f"/jobs/{record.id}/result",
             artifacts_url=f"/jobs/{record.id}/artifacts",
-            stages=parse_progress_csv(record.job_dir),
+            stages=parse_progress_csv(record.job_dir) if include_stages else None,
         )
 
-    def snapshot(self, job_id: str) -> JobSnapshot | None:
+    def snapshot(self, job_id: str, *, include_stages: bool = True) -> JobSnapshot | None:
         """按 ID 取作业快照:内存命中 → 实时投影;未命中 → 盘上历史只读重建。"""
         record = self._jobs.get(job_id)
         if record is not None:
-            return JobSnapshot(job_dir=record.job_dir, state=self.state(record))
-        return self._historic_snapshot(job_id)
+            return JobSnapshot(
+                job_dir=record.job_dir,
+                state=self.state(record, include_stages=include_stages),
+            )
+        return self._historic_snapshot(job_id, include_stages=include_stages)
 
-    def _historic_snapshot(self, job_id: str) -> JobSnapshot | None:
-        """盘上历史作业的只读视图(state.json 末帧);目录不存在/损坏 → None。"""
+    def _historic_snapshot(
+        self, job_id: str, *, include_stages: bool = True
+    ) -> JobSnapshot | None:
+        """盘上历史作业的只读视图(state.json 末帧);目录不存在/损坏 → None。
+
+        stages 与活跃路径同源:读时投影 job_dir 根的 progress.csv(旧档里
+        历史遗留的 stages 键被投影值覆盖,单一事实源)。
+        """
         job_dir = self._job_dir(job_id)
         if job_dir is None:
             return None
@@ -205,11 +210,14 @@ class JobQueue:
         if payload is None:
             return None
         try:
-            state = JobState.model_validate(payload)
+            state = JobState.model_validate({
+                **payload,
+                "stages": parse_progress_csv(job_dir) if include_stages else None,
+            })
         except ValidationError:
             logger.warning("历史作业 %s 的 %s 不合法,已跳过", job_id, STATE_FILENAME)
             return None
-        return JobSnapshot(job_dir=state_path.parent, state=state)
+        return JobSnapshot(job_dir=job_dir, state=state)
 
     def _job_dir(self, job_id: str) -> Path | None:
         """受统一守卫的作业目录路径;裸目录名非法 → None。
@@ -397,9 +405,13 @@ class JobQueue:
         self._transition(record, status=JobStatusEnum.SUCCEEDED, finished_at=_now_iso())
 
     def _persist(self, record: JobRecord) -> None:
-        """state.json = JobState 全字段 + resolved_params(保证可追溯)。"""
+        """state.json = JobState 除 stages 外全字段 + resolved_params(保证可追溯)。
+
+        stages 不归档:progress.csv 是唯一事实源(活跃与历史路径统一读时
+        投影),省去每次状态迁移附带的一次 CSV 解析。
+        """
         payload = {
-            **self.state(record).model_dump(mode="json"),
+            **self.state(record, include_stages=False).model_dump(mode="json"),
             "resolved_params": record.params.model_dump(mode="json"),
         }
         _write_json(record.job_dir / STATE_FILENAME, payload)
@@ -420,26 +432,43 @@ class JobQueue:
             logger.warning("防御性终止作业 %s 失败: %r", job_id, exc)
             _append_log(job_dir, f"防御性终止失败: {exc!r}")
 
-    def _revive_interrupted_jobs(self) -> None:
-        """上次进程遗留的 pending/running 作业 → failed(INTERNAL:服务重启中断)。"""
-        for state_path in sorted(self._jobs_root.glob(f"*/{STATE_FILENAME}")):
-            payload = _load_state_payload(state_path)
-            if payload is None or payload.get("status") not in {"pending", "running"}:
-                continue
-            revived = {
-                **payload,
-                "status": "failed",
-                "finished_at": _now_iso(),
-                "error": {"code": "INTERNAL", "message": "服务重启导致作业中断,请重新提交"},
-            }
-            _write_json(state_path, revived)
-            _append_log(state_path.parent, "服务重启,遗留作业标记为 failed")
-            logger.info("遗留作业 %s 已标记为 failed(服务重启中断)", state_path.parent.name)
-
 
 # ---------------------------------------------------------------------------
 # 模块级纯工具
 # ---------------------------------------------------------------------------
+
+def _recover_and_sweep_jobs(jobs_root: Path, retention_days: int) -> None:
+    """单次遍历完成作业目录的启动维护(每个 state.json 只读一次):
+
+    上次进程遗留的 pending/running 作业 → failed(INTERNAL:服务重启中断);
+    终态且 finished_at 超过保留期 → 删除目录。
+    """
+    if not jobs_root.is_dir():
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    removed = 0
+    for job_dir in sorted(path for path in jobs_root.iterdir() if path.is_dir()):
+        payload = _load_state_payload(job_dir / STATE_FILENAME)
+        if payload is None:
+            continue
+        status = payload.get("status")
+        if status in {"pending", "running"}:
+            _write_json(job_dir / STATE_FILENAME, {
+                **payload,
+                "status": "failed",
+                "finished_at": _now_iso(),
+                "error": {"code": "INTERNAL", "message": "服务重启导致作业中断,请重新提交"},
+            })
+            _append_log(job_dir, "服务重启,遗留作业标记为 failed")
+            logger.info("遗留作业 %s 已标记为 failed(服务重启中断)", job_dir.name)
+        elif status in TERMINAL_STATUS_VALUES:
+            finished_at = _parse_iso(payload.get("finished_at"))
+            if finished_at is None or finished_at >= cutoff:
+                continue
+            shutil.rmtree(job_dir, ignore_errors=True)
+            removed += 1
+    if removed:
+        logger.info("已清扫超期作业 %d 个(保留 %d 天)", removed, retention_days)
 
 def _sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
     """删除超过保留期的上传文件(按修改时间;启动时内存无在册作业,无引用冲突)。"""
@@ -458,26 +487,6 @@ def _sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
         removed += 1
     if removed:
         logger.info("已清扫超期上传 %d 个(保留 %d 天)", removed, retention_days)
-    return removed
-
-
-def _sweep_expired_jobs(jobs_root: Path, retention_days: int) -> int:
-    """删除终态且 finished_at 超过保留期的作业目录;返回删除数。"""
-    if not jobs_root.is_dir():
-        return 0
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    removed = 0
-    for job_dir in sorted(path for path in jobs_root.iterdir() if path.is_dir()):
-        payload = _load_state_payload(job_dir / STATE_FILENAME)
-        if payload is None or payload.get("status") not in TERMINAL_STATUS_VALUES:
-            continue
-        finished_at = _parse_iso(payload.get("finished_at"))
-        if finished_at is None or finished_at >= cutoff:
-            continue
-        shutil.rmtree(job_dir, ignore_errors=True)
-        removed += 1
-    if removed:
-        logger.info("已清扫超期作业 %d 个(保留 %d 天)", removed, retention_days)
     return removed
 
 
