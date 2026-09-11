@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ansys_hip import logtail as logtail_module
-from ansys_hip.logtail import _TAIL_CHUNK_BYTES, read_text_tail
+from ansys_hip.logtail import _TAIL_CHUNK_BYTES, read_tail
 
 
 def test_missing_file_returns_empty(tmp_path: Path) -> None:
