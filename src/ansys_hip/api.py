@@ -64,7 +64,7 @@ from .schemas import (
     UploadAccepted,
 )
 from .settings import Settings, load_settings
-from .sweeper import StorageSweeper
+from .sweeper import StorageSweeper, configure_sweep_logging
 from .uvicorn_log import configure_uvicorn_logging
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 服务运行日志接管(uvicorn + 应用 logger → service_log,按天轮转):
     # 取代启动命令的 shell 重定向;uvicorn.access 与自研访问日志重复故静默
     configure_uvicorn_logging(resolved_settings)
+    # 存储清理日志聚焦视图(service_log 同目录 sweep.log,双写不替代)
+    configure_sweep_logging(resolved_settings)
     # 开关式 CORS(server.cors_origins,默认空 = 不挂,行为不变):供前端页面
     # (如 hip-playback 回放组件)跨域拉取工件;只放行 GET(只读端点足够)。
     # 注意挂载顺序:add_middleware 是前插(insert(0)),后挂者在外层 —— 访问日志
@@ -244,6 +246,17 @@ def _health_router(settings: Settings, queue: JobQueue) -> APIRouter:
         """请求访问日志(var/logs/access.log,按天午夜轮转保留 14 天)尾部
         N 行;缺省全文(超 2MB 自动截尾 2000 行,带 X-Log-Truncated 头)。"""
         return _log_response(settings.access_log_path, tail)
+
+    @router.get(
+        "/service/sweep-log",
+        response_class=PlainTextResponse,
+        summary="存储清理日志(尾部)",
+    )
+    def get_service_sweep_log(tail: int | None = _tail_query()) -> PlainTextResponse:
+        """存储清理事件日志(service_log 同目录 sweep.log,按天午夜轮转保留
+        14 天:清扫/配额/水位告警/紧急清理/需人工介入)尾部 N 行;缺省全文
+        (超 2MB 自动截尾 2000 行,带 X-Log-Truncated 头)。"""
+        return _log_response(settings.sweep_log_path, tail)
 
     @router.get("/", include_in_schema=False)
     @router.get("/panel", include_in_schema=False)

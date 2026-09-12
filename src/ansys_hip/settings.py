@@ -192,6 +192,11 @@ class Settings(BaseModel):
         """服务运行日志文件路径(绝对路径)。"""
         return Path(self.service_log.file).resolve()
 
+    @property
+    def sweep_log_path(self) -> Path:
+        """存储清理日志文件路径(service_log 同目录 sweep.log,随日志位置配置)。"""
+        return self.service_log_path.parent / "sweep.log"
+
 
 # ---------------------------------------------------------------------------
 # 加载

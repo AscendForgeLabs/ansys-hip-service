@@ -8,6 +8,7 @@ ServiceLogConfig(服务运行日志,uvicorn 接管用)的校验;清扫行为用�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from ansys_hip.settings import (
 from ansys_hip import sweeper as sweeper_module
 from ansys_hip.sweeper import (
     GIB,
+    configure_sweep_logging,
     run_sweep_once,
     sweep_emergency,
     sweep_expired_jobs,
@@ -574,3 +576,42 @@ def test_watermark_monitor_triggers_emergency(
     # Assert(新鲜终态目录被紧急清理删除;候选耗尽 → error 报警)
     assert not fresh.exists()
     assert any("需人工介入" in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 清理日志(ansys_hip.sweeper → service_log 同目录 sweep.log 聚焦视图)
+# ---------------------------------------------------------------------------
+
+def test_sweep_actions_land_in_dedicated_sweep_log(settings_factory):
+    # Arrange
+    settings = settings_factory()
+    make_job_dir(settings.jobs_root, "staleJob01", finished_at=STALE_ISO)
+    assert settings.sweep_log_path == settings.service_log_path.parent / "sweep.log"
+
+    # Act(create_app 配置 handler;重复配置幂等;再跑一轮含删除的清扫)
+    create_app(settings)
+    create_app(settings)
+    run_sweep_once(settings, frozenset())
+
+    # Assert(清理行落 sweep.log;logger 恰一个受管 handler 不累积)
+    text = settings.sweep_log_path.read_text(encoding="utf-8")
+    assert "已清扫超期作业目录" in text
+    sweep_logger = logging.getLogger("ansys_hip.sweeper")
+    assert len(sweep_logger.handlers) == 1
+
+
+def test_service_sweep_log_endpoint(settings_factory):
+    # Arrange(进 lifespan:启动即刻轮删除超期目录并落 sweep.log)
+    settings = settings_factory()
+    make_job_dir(settings.jobs_root, "staleJob01", finished_at=STALE_ISO)
+
+    # Act / Assert
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/service/sweep-log")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+        assert "已清扫超期作业目录" in response.text
+
+        tail = client.get("/service/sweep-log?tail=1")
+        assert tail.status_code == 200
+        assert len(tail.text.strip().splitlines()) == 1

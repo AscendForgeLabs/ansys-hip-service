@@ -31,6 +31,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from .queue import (
@@ -219,6 +220,29 @@ def sweep_over_quota(
 def _disk_free_bytes(path: Path) -> int:
     """路径所在文件系统剩余字节(独立封装,测试以 monkeypatch 替换)。"""
     return shutil.disk_usage(path).free
+
+
+def configure_sweep_logging(settings: Settings) -> None:
+    """清理日志 → service_log 同目录 sweep.log(按天轮转;幂等重绑不累积)。
+
+    位置随 service_log.file 的目录走(自定义日志位置即同时 relocate);
+    propagate 保持 True — 清理事件同时进 service.log(完整运行日志),
+    sweep.log 是运维聚焦视图,GET /service/sweep-log 尾读。
+    """
+    for stale_handler in list(logger.handlers):
+        logger.removeHandler(stale_handler)
+        stale_handler.close()
+    logger.setLevel(logging.INFO)
+    target = settings.sweep_log_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handler = TimedRotatingFileHandler(
+        target,
+        when="midnight",
+        backupCount=settings.service_log.retention_days,
+        encoding="utf-8",
+    )
+    handler.name = "hip-sweep-file"
+    logger.addHandler(handler)
 
 
 def _watched_filesystems(paths: tuple[Path, ...]) -> tuple[Path, ...]:
