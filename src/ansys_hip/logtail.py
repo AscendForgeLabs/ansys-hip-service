@@ -2,7 +2,8 @@
 
 服务两类日志端点(GET /jobs/{id}/log 与 GET /service/log)共用:tail 给定时
 只做 O(尾部) IO 而非整个文件读进内存再切片(access.log 按天轮转单文件可达
-上百 MB;MAPDL 大模型 job.out 同理)。
+上百 MB;MAPDL 大模型 job.out 同理)。缺省全文经 read_log_view 防过长:
+超 LOG_FULL_MAX_BYTES 自动截尾 DEFAULT_TAIL_LINES 行并标记截尾。
 
 行界按字节 b"\\n" 判定(服务自身产出的两类日志均为 \\n 行界;含 \\r\\n 的
 文件返回值保留原始行尾)。与整读后 splitlines(keepends)[-N:] 在 \\n 行界
@@ -20,6 +21,26 @@ logger = logging.getLogger(__name__)
 
 # 反向回读的块大小(64KB:一次系统调用的开销与尾部覆盖率的平衡)
 _TAIL_CHUNK_BYTES = 64 * 1024
+
+# 缺省"全文"的字节阈值与回退行数:NERR 失控作业的 job.out 可达数百 MB,
+# 无界回传会打死浏览器/网络层(渲染层 2000 行截断来不及生效);超阈值自动
+# 截尾(2000 与面板 MAX_RENDER_LINES 对齐 — 更多行面板本来也只渲染末 2000)
+LOG_FULL_MAX_BYTES = 2 * 1024 * 1024
+DEFAULT_TAIL_LINES = 2000
+
+
+def read_log_view(path: Path, tail: int | None) -> tuple[str, bool]:
+    """日志端点共用的读取口径:tail 给定 → 精确尾读;缺省全文但文件超过
+    LOG_FULL_MAX_BYTES → 回退末 DEFAULT_TAIL_LINES 行。返回 (文本, 是否截尾)。"""
+    if tail is not None:
+        return read_tail(path, tail), False
+    try:
+        oversized = path.stat().st_size > LOG_FULL_MAX_BYTES
+    except OSError:
+        oversized = False
+    if not oversized:
+        return read_tail(path, None), False
+    return read_tail(path, DEFAULT_TAIL_LINES), True
 
 
 def read_tail(path: Path, tail: int | None) -> str:

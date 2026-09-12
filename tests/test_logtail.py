@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ansys_hip import logtail as logtail_module
-from ansys_hip.logtail import _TAIL_CHUNK_BYTES, read_tail
+from ansys_hip.logtail import DEFAULT_TAIL_LINES, _TAIL_CHUNK_BYTES, read_log_view, read_tail
 
 
 def test_missing_file_returns_empty(tmp_path: Path) -> None:
@@ -80,3 +80,51 @@ def test_directory_target_returns_empty(tmp_path: Path) -> None:
     """读失败(目标是目录)→ 空串,不抛(与缺文件同口径)。"""
     assert read_tail(tmp_path, 3) == ""
     assert read_tail(tmp_path, None) == ""
+
+
+# ---------------------------------------------------------------------------
+# read_log_view:日志端点共用的"缺省全文防过长"读(338MB 事故的 HTTP 出口护栏)
+# ---------------------------------------------------------------------------
+
+def test_read_log_view_small_file_full_text(tmp_path: Path) -> None:
+    """小文件缺省全文,无截尾。"""
+    target = tmp_path / "small.log"
+    target.write_text("一\n二\n三\n", encoding="utf-8")
+    assert read_log_view(target, None) == ("一\n二\n三\n", False)
+
+
+def test_read_log_view_oversized_defaults_to_bounded_tail(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """超阈值文件缺省回退末 DEFAULT_TAIL_LINES 行并标记截尾(NERR 失控 job.out 防护)。"""
+    monkeypatch.setattr(logtail_module, "LOG_FULL_MAX_BYTES", 4096)
+    target = tmp_path / "huge.log"
+    filler = "x" * 63 + "\n"  # 64B/行
+    with target.open("w", encoding="utf-8") as handle:
+        for _ in range(3000):  # ~192KB,远超阈值且行数 > 回退行数
+            handle.write(filler)
+        handle.write("TAIL-MARKER-5221\n")
+    text, truncated = read_log_view(target, None)
+    assert truncated is True
+    lines = text.splitlines()
+    assert len(lines) == DEFAULT_TAIL_LINES
+    assert lines[-1] == "TAIL-MARKER-5221"
+
+
+def test_read_log_view_explicit_tail_unaffected(tmp_path: Path, monkeypatch) -> None:
+    """显式 tail 走原语义:不受阈值影响、无截尾标记。"""
+    monkeypatch.setattr(logtail_module, "LOG_FULL_MAX_BYTES", 4096)
+    target = tmp_path / "huge2.log"
+    filler = "y" * 63 + "\n"
+    with target.open("w", encoding="utf-8") as handle:
+        for _ in range(3000):
+            handle.write(filler)
+        handle.write("TAIL-MARKER-5221\n")
+    text, truncated = read_log_view(target, 50)
+    assert truncated is False
+    assert len(text.splitlines()) == 50
+    assert text.splitlines()[-1] == "TAIL-MARKER-5221"
+
+
+def test_read_log_view_missing_file_empty(tmp_path: Path) -> None:
+    assert read_log_view(tmp_path / "nope.log", None) == ("", False)

@@ -42,7 +42,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import __version__, registry
 from .access_log import configure_access_logging, make_access_log_middleware
-from .logtail import read_tail
+from .logtail import read_log_view
 from .queue import (
     ACTIVE_STATUSES,
     ARTIFACTS_DIRNAME,
@@ -103,7 +103,18 @@ def _tail_query() -> Any:
     """tail 参数共用工厂(两个日志端点同形:1 ≤ N ≤ LOG_TAIL_MAX_LINES,缺省全文)。"""
     return Query(
         default=None, ge=1, le=LOG_TAIL_MAX_LINES,
-        description="只取最后 N 行;缺省返回全文",
+        description="只取最后 N 行;缺省返回全文(文件超 2MB 自动截尾 2000 行,"
+                    "响应带 X-Log-Truncated: true)",
+    )
+
+
+def _log_response(path: Path, tail: int | None) -> PlainTextResponse:
+    """日志端点共用出口:read_log_view 读取,截尾时带 X-Log-Truncated 头。"""
+    text, truncated = read_log_view(path, tail)
+    return PlainTextResponse(
+        text,
+        media_type="text/plain",
+        headers={"X-Log-Truncated": "true"} if truncated else None,
     )
 
 # 非业务 HTTPException(路由未命中等)按状态码兜底的错误码
@@ -222,11 +233,8 @@ def _health_router(settings: Settings, queue: JobQueue) -> APIRouter:
     )
     def get_service_log(tail: int | None = _tail_query()) -> PlainTextResponse:
         """请求访问日志(var/logs/access.log,按天午夜轮转保留 14 天)尾部
-        N 行;缺省全文。"""
-        return PlainTextResponse(
-            read_tail(settings.access_log_path, tail),
-            media_type="text/plain",
-        )
+        N 行;缺省全文(超 2MB 自动截尾 2000 行,带 X-Log-Truncated 头)。"""
+        return _log_response(settings.access_log_path, tail)
 
     @router.get("/", include_in_schema=False)
     @router.get("/panel", include_in_schema=False)
@@ -530,15 +538,15 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
                         "运行中仅存在于作业目录根部,可实时查看)",
         ),
     ) -> PlainTextResponse:
-        """job.log / job.out 全文;?tail=N 只取最后 N 行。"""
+        """job.log / job.out 全文;?tail=N 只取最后 N 行(缺省全文对超 2MB
+        文件自动截尾 2000 行,响应带 X-Log-Truncated 头)。"""
         snapshot = require_job(job_id, include_stages=False)
         if source not in LOG_SOURCE_WHITELIST:
             raise ApiError(
                 400, "INVALID_PARAMS",
                 f"不支持的日志源 '{source}';允许: {sorted(LOG_SOURCE_WHITELIST)}",
             )
-        text = read_tail(snapshot.job_dir / source, tail)
-        return PlainTextResponse(text, media_type="text/plain")
+        return _log_response(snapshot.job_dir / source, tail)
 
     @router.get(
         "/{job_id}/result",

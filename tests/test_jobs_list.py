@@ -18,6 +18,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from ansys_hip import logtail as logtail_module
 from ansys_hip.api import create_app
 from ansys_hip.queue import JobQueue
 from ansys_hip.results import PROGRESS_FILENAME
@@ -312,3 +313,29 @@ def test_log_source_job_out_reads_root_file_with_tail(settings_factory) -> None:
         tail = client.get("/jobs/hist-out/log?source=job.out&tail=2")
         assert tail.status_code == 200
         assert tail.text == "MAPDL 第2行\nMAPDL 第3行\n"
+
+
+def test_log_oversized_defaults_to_bounded_tail(settings_factory, monkeypatch) -> None:
+    """338MB 事故护栏:缺省全文对超阈值文件自动截尾并带 X-Log-Truncated 头;
+    显式 tail 语义不变、无头。"""
+    settings = enabled_settings(settings_factory)
+    make_history_job(settings.jobs_root, "hist-huge")
+    monkeypatch.setattr(logtail_module, "LOG_FULL_MAX_BYTES", 4096)
+    job_out = settings.jobs_root / "hist-huge" / "job.out"
+    filler = "x" * 63 + "\n"  # 64B/行
+    with job_out.open("w", encoding="utf-8") as handle:
+        for _ in range(3000):  # ~192KB,远超阈值且行数 > 回退行数
+            handle.write(filler)
+        handle.write("TAIL-MARKER-5221\n")
+    with TestClient(create_app(settings)) as client:
+        full = client.get("/jobs/hist-huge/log?source=job.out")
+        assert full.status_code == 200
+        assert full.headers.get("X-Log-Truncated") == "true"
+        lines = full.text.splitlines()
+        assert len(lines) == 2000
+        assert lines[-1] == "TAIL-MARKER-5221"
+
+        tail = client.get("/jobs/hist-huge/log?source=job.out&tail=50")
+        assert tail.status_code == 200
+        assert "X-Log-Truncated" not in tail.headers
+        assert len(tail.text.splitlines()) == 50

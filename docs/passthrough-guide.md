@@ -159,7 +159,7 @@ passthrough 是**唯一提交通道**(`POST /sim/passthrough`,结果
 | `/jobs` | GET | 作业列表(队列 + 盘上历史,受理时间倒序;运维向) |
 | `/jobs/{id}` | GET | 轮询状态 + `stages` 阶段进度(服务重启后盘上历史作业仍可查) |
 | `/jobs/{id}/result` | GET | 结果 JSON(仅 succeeded) |
-| `/jobs/{id}/log` | GET | 作业日志纯文本;`?source=job.log\|job.out` 选源,`?tail=N` 取尾 |
+| `/jobs/{id}/log` | GET | 作业日志纯文本;`?source=job.log\|job.out` 选源,`?tail=N` 取尾;缺省全文但**超 2MB 自动截尾 2000 行**(响应带 `X-Log-Truncated: true`) |
 | `/jobs/{id}/artifacts` | GET | 工件文件名数组 |
 | `/jobs/{id}/artifacts/{name}` | GET | 流式下载单个工件 |
 | `/jobs/{id}/cancel` | POST | 强制中断 pending/running 作业:终止进程组(SIGTERM→SIGKILL)并置 cancelled,**保留作业目录/job.out/日志供排障**;终态作业幂等返回当前状态 |
@@ -392,6 +392,19 @@ CDREAD,DB,,capsule_mesh,cdb    ! 读同目录 capsule_mesh.cdb(经 extra_files �
 - `.inp` 写出的文件落在作业目录根,服务把**已发布**的复制进 `artifacts/` 供下载;
   未声明也未自动处理的文件留在根目录,不可下载(避免误发布中间大文件);
 - 单并发(`max_concurrent=1`):所有作业共享单许可串行执行。
+
+**失控输出与退出码(实测教训,写大模型前必读)**:
+
+- `/NERR` 的 **NMABT 默认 10000**:累计警告+错误超万条即
+  `The number of ERROR and WARNING messages exceeds 10000 ... The ANSYS run is
+  terminated by this error`,且海量输出会把 job.out 撑到数百 MB。错误源应尽早修正;
+  确需放宽显示上限时在 .inp 头部加 `/NERR,,99999999`(上限 99,999,999);
+- 批处理对错误敏感:首错即进入终止路径(`/INPUT` 中遇错即止可用 `IFKEY=1` 控制);
+- 官方退出码(Mechanical APDL Operations Guide §4.1 Table 4.1):
+  `0`=正常退出,`1`=指示错误(含崩溃信号),`5`=命令行参数错误,`7`=许可失败,
+  `8`=运行结束异常。作业失败时服务在错误消息中附官方语义;
+- 中断逃生门:`POST /jobs/{id}/cancel` 强制中断(终止进程组,**保留作业目录/日志
+  供排障**);超时上限内未完成则 TIMEOUT 自动终止。
 
 ### 4.1 单位制与 MAT 编号:责任归上游
 

@@ -83,6 +83,24 @@ async function fetchText(url) {
   return resp.text();
 }
 
+// 日志专用拉取:服务端对超 2MB 文件缺省截尾 2000 行并带 X-Log-Truncated 头
+async function fetchLog(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw await readErrorBody(resp);
+  return {
+    text: await resp.text(),
+    truncated: resp.headers.get("X-Log-Truncated") === "true",
+  };
+}
+
+function showTruncationHint(box) {
+  // 置顶提示行不计入渲染截断的行数切片(log-skip 弱化样式)
+  box.insertBefore(
+    el("div", "log-line log-skip", "(文件过大,服务端已截尾至末 2000 行)"),
+    box.firstChild
+  );
+}
+
 // ===== 错误条 =====
 function showError(message) {
   const bar = $("error-bar");
@@ -462,9 +480,10 @@ async function fetchDrawerLog(stick = "auto") {
   const seq = ++drawerLogSeq;
   const jobId = drawer.jobId; // 身份锚点:响应回来时抽屉可能已切到别的作业
   try {
-    const text = await fetchText(buildLogUrl(drawer.job, drawer.source, drawer.tail));
+    const { text, truncated } = await fetchLog(buildLogUrl(drawer.job, drawer.source, drawer.tail));
     if (seq !== drawerLogSeq || state.drawer.jobId !== jobId) return;
     renderLogPinned($("log-content"), text, "job", drawer.follow ? stick : false);
+    if (truncated) showTruncationHint($("log-content"));
   } catch (err) {
     if (seq !== drawerLogSeq || state.drawer.jobId !== jobId) return;
     renderLogPinned($("log-content"), "日志加载失败:" + err.code + ":" + err.message, "job", false);
@@ -529,10 +548,11 @@ async function refreshServiceLog() {
   const url = "/service/log" + (tail ? "?tail=" + tail : "");
   const box = $("service-log-content");
   try {
-    const text = await fetchText(url);
+    const { text, truncated } = await fetchLog(url);
     if (seq !== serviceLogSeq) return;
     // 自动刷新只跟随"原本就在底部"的视图:上翻阅读历史不被拽回最新
     renderLogPinned(box, text, "service", "auto");
+    if (truncated) showTruncationHint(box);
   } catch (err) {
     if (seq !== serviceLogSeq) return;
     renderLogPinned(box, "服务日志加载失败:" + err.code + ":" + err.message, "service", false);
