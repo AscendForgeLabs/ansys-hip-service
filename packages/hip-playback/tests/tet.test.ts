@@ -187,6 +187,43 @@ describe("buildTetMesh · 两 tet10 共享面", () => {
     expect(totalTris(m)).toBe(24);
     expect(m.vertBase).toHaveLength(14 * 3);
   });
+
+  it("非流形防御:三个 tet 共享同一面(面键出现 3 次)→ 该面不渲染,其余 9 面正常", () => {
+    // 单元 A(顶点 4)/B(顶点 5)/C(顶点 15)都骑在面 (1,2,3) 上:
+    // 共享面键 "1-2-3" 出现 3 次 > 2 → 按非流形内部面剔除;
+    // 三单元各自余下 3 面恰现 1 次,全为边界面。
+    const pos: Readonly<Record<number, Pos>> = {
+      1: [0, 0, 0], 2: [4, 0, 0], 3: [0, 4, 0],
+      4: [1, 1, -3], 5: [1, 1, 3], 15: [-3, 1, 1],
+      6: [2, 0, 0], 7: [2, 2, 0], 8: [0, 2, 0],
+      9: [0.5, 0.5, -1.5], 10: [2.5, 0.5, -1.5], 11: [0.5, 2.5, -1.5],
+      12: [0.5, 0.5, 1.5], 13: [2.5, 0.5, 1.5], 14: [0.5, 2.5, 1.5],
+      16: [-1.5, 0.5, 0.5], 17: [-1.5, 1.2, 0.3], 18: [-1.2, 2, 0.5],
+    };
+    const emap3: EmapTable = {
+      cell: "tet",
+      elements: [
+        [1, 2, 3, 4, 6, 7, 8, 9, 10, 11],
+        [1, 2, 3, 5, 6, 7, 8, 12, 13, 14],
+        [1, 2, 3, 15, 6, 7, 8, 16, 17, 18],
+      ],
+      hasMidnodes: true,
+    };
+    const m3 = buildTetMesh({ frames: makeFrames(pos), emap: emap3 });
+
+    expect(m3.faces).toHaveLength(9);              // 3 单元 × 3 面,共享面被剔除
+    expect(totalTris(m3)).toBe(36);
+    // 共享面(含角点 1/2/3 的面)不存在于输出
+    const v1 = findVert(m3, pos[1]!), v2 = findVert(m3, pos[2]!), v3 = findVert(m3, pos[3]!);
+    for (const face of m3.faces) {
+      expect(face.tris.includes(v1) && face.tris.includes(v2) && face.tris.includes(v3)).toBe(false);
+    }
+    // 共享面的棱中点 6/7/8 仍被相邻边界面引用 → 顶点恰 18 节点全局去重
+    expect(countVertsAt(m3, pos[6]!)).toBe(1);
+    expect(countVertsAt(m3, pos[7]!)).toBe(1);
+    expect(countVertsAt(m3, pos[8]!)).toBe(1);
+    expect(m3.vertBase).toHaveLength(18 * 3);
+  });
 });
 
 describe("buildTetMesh · 绕向定向", () => {
@@ -285,6 +322,22 @@ describe("buildTetMesh · epart 部件标注", () => {
     expect(m.faces.slice(0, 4).map((f) => f.part)).toEqual([5, 5, 5, 5]);
     expect(m.faces.slice(4).map((f) => f.part)).toEqual([3, 3, 3, 3]);
     expect(m.parts).toEqual([3, 5]);
+  });
+
+  it("elemIds 长度与单元数不一致 → 显式报错(不静默回退 e+1 混编号)", () => {
+    const badIds: EmapTable = {
+      cell: "tet",
+      elements: [[1, 2, 3, 4], [5, 6, 7, 8]],
+      hasMidnodes: false,
+      elemIds: [10, 20, 30],
+    };
+    expect(() =>
+      buildTetMesh({
+        frames: makeFrames(pos),
+        emap: badIds,
+        epart: epartOf([[10, 1]]),
+      }),
+    ).toThrow(/elemIds 长度 3 与单元数 2 不一致/);
   });
 
   it("hex emap + epart → 分发层显式报错(不静默忽略)", () => {

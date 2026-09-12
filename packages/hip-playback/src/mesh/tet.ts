@@ -171,8 +171,15 @@ export function buildTetMesh(input: MeshInput & { emap: EmapTable; epart?: Epart
   if (frames.length === 0) {
     throw new Error("frames 为空:tet 构网至少需要一帧初始构型");
   }
-  const boundary = collectTetBoundaryFaces(input.emap, frames[0]!);
-  const shell = buildTetShell(boundary, frames, input.epart, input.emap.elemIds);
+  const { emap } = input;
+  if (emap.elemIds !== undefined && emap.elemIds.length !== emap.elements.length) {
+    throw new Error(
+      `tet emap elemIds 长度 ${emap.elemIds.length} 与单元数 ${emap.elements.length} 不一致,` +
+        "无法按行对齐单元号(epart 部件归属会混编号)",
+    );
+  }
+  const boundary = collectTetBoundaryFaces(emap, frames[0]!);
+  const shell = buildTetShell(boundary, frames, input.epart, emap.elemIds);
   const nseg = frames.length;
   const parts = [...new Set(shell.faces.map((f) => f.part ?? 0))].sort((a, b) => a - b);
   return {
