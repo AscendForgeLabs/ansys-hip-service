@@ -75,13 +75,24 @@ class QueueConfig(BaseModel):
 
 
 class StorageConfig(BaseModel):
-    """作业/上传文件的落盘位置与保留策略。"""
+    """作业/上传文件的落盘位置与保留策略。
+
+    清理触发三路(0 值 = 关闭对应路):启动必扫一次;周期任务按 sweep_interval_s
+    重复;磁盘剩余低于 min_free_gb 触发紧急清理。配额 max_total_gb 为第二道
+    保险,超限按最老优先删终态作业(49G 爆盘事故的双保险设计)。
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     jobs_dir: str = "var/jobs"
     uploads_dir: str = "var/uploads"
     retention_days: int = Field(default=3, ge=1)
+    # 周期清扫间隔(秒):启动必扫一次,此后按间隔重复;0 = 关闭周期路(仅启动)
+    sweep_interval_s: int = Field(default=3600, ge=0)
+    # jobs/uploads 所在文件系统剩余空间水位(GB),低于即触发紧急清理;0 = 关闭水位路
+    min_free_gb: float = Field(default=0.0, ge=0)
+    # jobs+uploads 合计总量上限(GB),超限按最老优先删终态作业;0 = 关闭配额路
+    max_total_gb: float = Field(default=0.0, ge=0)
 
 
 class MethodsConfig(BaseModel):
@@ -115,6 +126,20 @@ class AccessLogConfig(BaseModel):
     retention_days: int = Field(default=14, ge=1)
 
 
+class ServiceLogConfig(BaseModel):
+    """服务运行日志配置(uvicorn + 应用 logger 代码内接管,按天午夜轮转)。
+
+    取代启动命令的 shell 重定向(旧 uvicorn.log 无轮转、路径不受配置控制);
+    路径随本配置而非部署命令,自定义日志位置即改此 file。启动命令不得再传
+    --log-config(会与本接管互抢)。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    file: str = "var/logs/service.log"
+    retention_days: int = Field(default=14, ge=1)
+
+
 class Settings(BaseModel):
     """服务全量配置(不可变);config_path 由加载过程注入。"""
 
@@ -127,6 +152,7 @@ class Settings(BaseModel):
     methods: MethodsConfig = MethodsConfig()
     passthrough: PassthroughConfig = PassthroughConfig()
     access_log: AccessLogConfig = Field(default_factory=AccessLogConfig)
+    service_log: ServiceLogConfig = Field(default_factory=ServiceLogConfig)
     config_path: Path = DEFAULT_CONFIG_PATH
 
     @property
@@ -143,6 +169,11 @@ class Settings(BaseModel):
     def access_log_path(self) -> Path:
         """请求访问日志文件路径(绝对路径)。"""
         return Path(self.access_log.file).resolve()
+
+    @property
+    def service_log_path(self) -> Path:
+        """服务运行日志文件路径(绝对路径)。"""
+        return Path(self.service_log.file).resolve()
 
 
 # ---------------------------------------------------------------------------

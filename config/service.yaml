@@ -21,6 +21,13 @@ storage:
   jobs_dir: var/jobs
   uploads_dir: var/uploads   # POST /uploads/apdl 上传文件落盘位置
   retention_days: 3     # 完成作业保留 3 天后清理
+  sweep_interval_s: 3600   # 周期清扫间隔(秒):长跑期间 retention_days 也被执行;0 = 仅启动时清扫一次
+  min_free_gb: 20          # 数据盘剩余低于 20G 触发紧急清理(无视保留期删最老终态作业;0 = 关闭水位监控)
+  max_total_gb: 100        # jobs+uploads 合计超 100G 按最老优先删终态作业(0 = 关闭配额)
+
+service_log:
+  file: /ansys/hip-var/logs/service.log   # uvicorn+应用运行日志(代码内接管,按天轮转保 14 天);
+                                          # 启动命令不再需要 shell 重定向
 
 methods:
   disabled: []          # 例: ["passthrough"] 可临时下线方法

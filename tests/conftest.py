@@ -14,6 +14,7 @@ from ansys_hip.settings import (
     AccessLogConfig,
     AnsysConfig,
     MethodsConfig,
+    ServiceLogConfig,
     Settings,
     StorageConfig,
     load_settings,
@@ -54,6 +55,10 @@ def make_settings(
             # 访问日志同样隔离到 tmp:测试运行不写仓库 var/logs/access.log
             "access_log": AccessLogConfig(
                 file=str(tmp_path / "logs" / "access.log")
+            ),
+            # 服务运行日志(root logger 接管)同样隔离,防测试写仓库 var/logs/service.log
+            "service_log": ServiceLogConfig(
+                file=str(tmp_path / "logs" / "service.log")
             ),
         }
     )
