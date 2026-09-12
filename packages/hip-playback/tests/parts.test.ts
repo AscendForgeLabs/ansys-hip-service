@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { defineHipPlayback, HipPlaybackElement } from "../src/element";
 import type { FaceGeom, MeshData } from "../src/mesh/types";
 import { groupFacesByPart, PlaybackScene, VisibilityState } from "../src/scene";
-import { buildHud, configureHud } from "../src/ui";
+import { buildHud, configureHud, resetChipStates } from "../src/ui";
 import type { HudHandles } from "../src/ui";
 
 // ---- scene 替身:仅元素级用例消费;其余导出保真(groupFacesByPart 等) ----
@@ -26,10 +26,18 @@ vi.mock("../src/scene", async (importOriginal) => {
     mesh: MeshData | null = null;
     layers: Array<[string, boolean]> = [];
     parts: Array<[number, boolean]> = [];
+    shellOn = true;                        // 模拟真场景层状态(VisibilityState 口径)
+    wireOn = true;
+    partsOn = new Set<number>();           // 模拟真场景部件表(setMesh 清空)
     constructor(_canvas: HTMLCanvasElement) {
       FakeScene.instances.push(this);
     }
-    setMesh(data: MeshData): void { this.mesh = data; }
+    setMesh(data: MeshData): void {
+      this.mesh = data;
+      this.shellOn = true;                 // 对齐真场景 reset(层 + 部件全复位)
+      this.wireOn = true;
+      this.partsOn = new Set();
+    }
     resize(): void {}
     update(): { uMax: number; depth: number } { return { uMax: 0, depth: 0 }; }
     resetView(): void {}
@@ -38,9 +46,13 @@ vi.mock("../src/scene", async (importOriginal) => {
     dispose(): void {}
     setLayerVisible(layer: string, visible: boolean): void {
       this.layers.push([layer, visible]);
+      if (layer === "shell") this.shellOn = visible;
+      else if (layer === "wire") this.wireOn = visible;
     }
     setPartVisible(part: number, visible: boolean): void {
       this.parts.push([part, visible]);
+      if (visible) this.partsOn.add(part);
+      else this.partsOn.delete(part);
     }
   }
   return { ...actual, PlaybackScene: FakeScene };
@@ -59,6 +71,18 @@ const track = <T extends HTMLElement>(node: T): T => {
   return node;
 };
 
+/** FakeScene 的可断言面(调用流水 + 模拟状态),元素级用例取"最近实例"用。 */
+interface FakeSceneLike {
+  mesh: MeshData | null;
+  layers: Array<[string, boolean]>;
+  parts: Array<[number, boolean]>;
+  shellOn: boolean;
+  wireOn: boolean;
+  partsOn: Set<number>;
+}
+const lastFake = (): FakeSceneLike =>
+  (PlaybackScene as unknown as { instances: FakeSceneLike[] }).instances.at(-1)!;
+
 // ---- tet 小 fixture:两 tet4 共享面 (1,2,3),part 1/2 各一单元(字面量 emap
 // 不带 elemIds → 天然走行序 e+1 回退,emap 5 列 = tet4 档) ----
 const TET_TEXTS: Record<string, string> = {
@@ -74,6 +98,14 @@ const HEX_TEXTS: Record<string, string> = {
   "frame_1.csv": load("fixtures/synthetic/artifacts/frame_1.csv"),
   "emap.csv": load("fixtures/synthetic/artifacts/emap.csv"),
   "epart.csv": "elem,part\n1,1\n",
+};
+
+// lattice fixture:同一份合成工件只喂 frames(2×2×2 hex20 正则格 → 规则格反推;
+// lattice 模式才有 ghost/punch chip)
+const LATTICE_TEXTS: Record<string, string> = {
+  "frame_1.csv": load("fixtures/synthetic/artifacts/frame_1.csv"),
+  "frame_2.csv": load("fixtures/synthetic/artifacts/frame_2.csv"),
+  "frame_3.csv": load("fixtures/synthetic/artifacts/frame_3.csv"),
 };
 
 describe("groupFacesByPart 分组装配", () => {
@@ -152,13 +184,14 @@ describe("VisibilityState 层 × 部件正交", () => {
     expect(v.wireVisible(1)).toBe(true);
   });
 
-  it("reset 复位到全可见(换装新网格)", () => {
+  it("reset 全复位(换装/重连 = 全部默认 on):层与部件都回可见", () => {
     const v = new VisibilityState();
     v.setPart(1, false);
     v.setLayer("wire", false);
     v.reset();
-    expect(v.faceVisible(1)).toBe(true);
-    expect(v.wireVisible(1)).toBe(true);
+    expect(v.faceVisible(1)).toBe(true);       // 部件表清空
+    expect(v.wireVisible(1)).toBe(true);       // 层状态同复位
+    expect(v.faceVisible(2)).toBe(true);
   });
 });
 
@@ -199,6 +232,30 @@ describe("configureHud 部件 chip", () => {
     configureHud(h, { ...base, mode: "emap", parts: [] });
     expect(partChips(h)).toHaveLength(0);
   });
+
+  it("重载(configureHud):被点灭的 shell/wire 静态 chip 补回 on(换装 = 全默认)", () => {
+    const h = buildHandles();
+    configureHud(h, { ...base, mode: "emap", parts: [1] });
+    h.tagsRoot.querySelector<HTMLElement>('[data-layer="shell"]')!.classList.remove("on");
+    h.tagsRoot.querySelector<HTMLElement>('[data-layer="wire"]')!.classList.remove("on");
+    configureHud(h, { ...base, mode: "emap", parts: [5] });
+    expect(h.tagsRoot.querySelector<HTMLElement>('[data-layer="shell"]')!
+      .classList.contains("on")).toBe(true);
+    expect(h.tagsRoot.querySelector<HTMLElement>('[data-layer="wire"]')!
+      .classList.contains("on")).toBe(true);
+  });
+
+  it("resetChipStates:tagsRoot 下全部 .hip-tag 统一恢复 on", () => {
+    const h = buildHandles();
+    configureHud(h, { ...base, mode: "lattice", parts: [1, 2] });   // lattice 带 ghost/punch
+    for (const chip of h.tagsRoot.querySelectorAll<HTMLElement>(".hip-tag")) {
+      chip.classList.remove("on");
+    }
+    resetChipStates(h.tagsRoot);
+    const all = [...h.tagsRoot.querySelectorAll<HTMLElement>(".hip-tag")];
+    expect(all.length).toBeGreaterThanOrEqual(5);                   // shell/wire/ghost/punch/部件
+    expect(all.every((c) => c.classList.contains("on"))).toBe(true);
+  });
 });
 
 describe("<hip-playback> epart 端到端", () => {
@@ -208,12 +265,8 @@ describe("<hip-playback> epart 端到端", () => {
     track(document.body.appendChild(document.createElement("hip-playback"))) as HipPlaybackElement;
   const meshOf = (el: HipPlaybackElement): MeshData | null =>
     (el as unknown as { mesh: MeshData | null }).mesh;
-  const lastFake = (): { mesh: MeshData | null; layers: Array<[string, boolean]>;
-                         parts: Array<[number, boolean]> } =>
-    (PlaybackScene as unknown as {
-      instances: Array<{ mesh: MeshData | null; layers: Array<[string, boolean]>;
-                         parts: Array<[number, boolean]> }>;
-    }).instances.at(-1)!;
+  const partChipsOf = (el: HipPlaybackElement): HTMLElement[] =>
+    [...el.shadowRoot!.querySelectorAll<HTMLElement>('[data-layer^="part:"]')];
 
   it("tet frame+emap+epart:mesh 分部件正确、sub 文案带部件数、note 追加 epart.csv", async () => {
     const el = mountEl();
@@ -270,5 +323,81 @@ describe("<hip-playback> epart 端到端", () => {
     expect(fake.layers).toEqual([["shell", false]]);
     // 全程未动部件状态:层开关与部件开关各走各的入口
     expect(fake.parts).toEqual([[1, false], [1, true]]);
+  });
+
+  it("畸形 part chip(data-layer 非整数)→ 忽略,不调 setPartVisible", async () => {
+    const el = mountEl();
+    await el.loadData(TET_TEXTS);
+    const fake = lastFake();
+    const bogus = document.createElement("span");
+    bogus.className = "hip-tag";               // 无 on → 首次点击语义 = 开;guard 拦截不翻转场景
+    bogus.dataset.layer = "part:abc";
+    el.shadowRoot!.querySelector<HTMLElement>("#hip-tags")!.append(bogus);
+    bogus.click();
+    expect(fake.parts).toEqual([]);            // 畸形值忽略(不产生 NaN 部件号)
+    bogus.dataset.layer = "part:2";
+    bogus.click();
+    expect(fake.parts).toEqual([[2, false]]);  // 合法值照常分发
+  });
+
+  it("关 shell/part → 重载新工件:chips 与画面一致回到全默认 on(复位口径)", async () => {
+    const el = mountEl();
+    await el.loadData(TET_TEXTS);
+    const scene = lastFake();
+    el.shadowRoot!.querySelector<HTMLElement>('[data-layer="shell"]')!.click();
+    el.shadowRoot!.querySelector<HTMLElement>('[data-layer="part:1"]')!.click();
+    expect(scene.shellOn).toBe(false);
+    expect(scene.parts).toEqual([[1, false]]);   // 两 chip 均已点灭
+
+    await el.loadData(TET_TEXTS);              // 重载:同场景换装,显隐全复位
+    expect(lastFake()).toBe(scene);            // 场景实例复用
+    const all = [...el.shadowRoot!.querySelectorAll<HTMLElement>(".hip-tag")];
+    expect(all.every((c) => c.classList.contains("on"))).toBe(true);   // chips 全 on
+    expect(scene.shellOn).toBe(true);          // 画面同态:层复位
+    expect(scene.partsOn.size).toBe(0);        // 画面同态:部件表清空
+  });
+
+  it("切 part chip → 断连重连:chips 全 on,与全新场景(全默认)一致", async () => {
+    const el = mountEl();
+    await el.loadData(TET_TEXTS);
+    el.shadowRoot!.querySelector<HTMLElement>('[data-layer="part:1"]')!.click();
+    el.shadowRoot!.querySelector<HTMLElement>('[data-layer="shell"]')!.click();
+    const before = lastFake();
+    expect(before.shellOn).toBe(false);
+
+    el.remove();                               // 断连(scene dispose)
+    document.body.append(el);                  // 重连(rebuildScene)
+    const rebuilt = lastFake();
+    expect(rebuilt).not.toBe(before);          // 场景已换新(全默认可见)
+    const all = [...el.shadowRoot!.querySelectorAll<HTMLElement>(".hip-tag")];
+    expect(all.every((c) => c.classList.contains("on"))).toBe(true);   // chips 全 on
+    expect(rebuilt.shellOn).toBe(true);        // 与 chips 一致
+    expect(rebuilt.partsOn.size).toBe(0);
+  });
+
+  it("lattice 关 ghost/punch → 断连重连:全部 chip 类别复位 on 且与画面一致", async () => {
+    const el = mountEl();
+    await el.loadData(LATTICE_TEXTS);
+    expect(meshOf(el)!.mode).toBe("lattice");
+    const before = lastFake();
+    for (const layer of ["shell", "wire", "ghost", "punch"]) {
+      el.shadowRoot!.querySelector<HTMLElement>(`[data-layer="${layer}"]`)!.click();
+    }
+    expect(before.layers).toEqual([
+      ["shell", false], ["wire", false], ["ghost", false], ["punch", false],
+    ]);
+
+    el.remove();                               // 断连(scene dispose)
+    document.body.append(el);                  // 重连(rebuildScene)
+    const rebuilt = lastFake();
+    expect(rebuilt).not.toBe(before);
+    // 全部 chip 类别复位 on(lattice 无部件 chip,恰四枚)
+    const all = [...el.shadowRoot!.querySelectorAll<HTMLElement>(".hip-tag")];
+    expect(all.map((c) => c.dataset.layer).sort()).toEqual(["ghost", "punch", "shell", "wire"]);
+    expect(all.every((c) => c.classList.contains("on"))).toBe(true);
+    // 画面:全新场景无任何显隐调用 = 全默认可见,与 chips 一致
+    expect(rebuilt.layers).toEqual([]);
+    expect(rebuilt.shellOn).toBe(true);
+    expect(rebuilt.wireOn).toBe(true);
   });
 });

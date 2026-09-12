@@ -345,6 +345,12 @@ describe("buildTetMesh · epart 部件标注", () => {
       buildMeshData({ frames: hexFrames, emap: hexEmap, epart: epartOf([[1, 1]]) }),
     ).toThrow(/epart 部件分组当前仅支持 tet 皮肤/);
   });
+
+  it("epart 无 emap → 分发层显式报错(不静默走规则格反推)", () => {
+    expect(() =>
+      buildMeshData({ frames: hexFrames, epart: epartOf([[1, 1]]) }),
+    ).toThrow(/epart 需与 emap.csv 同供/);
+  });
 });
 
 describe("buildTetMesh · tet4 线性单元", () => {

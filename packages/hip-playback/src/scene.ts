@@ -65,7 +65,9 @@ export class VisibilityState {
   faceVisible(part: number): boolean { return this.shell && this.partOn(part); }
   wireVisible(part: number): boolean { return this.wire && this.partOn(part); }
 
-  /** 换装新网格时复位(默认全可见,与新 Mesh.visible 默认 true 同态)。 */
+  /** 换装/重连 = 显隐全复位(层 + 部件全部回默认可见)——ghost/punch/部件
+   * chip 本就每轮重建,shell/wire 偏好独留会与 HUD 自相矛盾;装配后由
+   * setMesh 显式 applyVisibility 落到新网格,画面与 HUD chip 同态。 */
   reset(): void {
     this.shell = true;
     this.wire = true;
@@ -193,7 +195,8 @@ export class PlaybackScene {
     });
     // 分部件合并装配:各组共享同一份 position/color/normal BufferAttribute,
     // 仅三角/网格线索引不同(1728 边界面的 tet 作业 3456 → 部件数×2 draw call);
-    // 部件显隐状态随新网格复位(默认全可见)。
+    // 显隐全复位(层 + 部件回默认可见),装配后立即落到新网格 ——
+    // HUD chip 与画面不漂移。
     this.visibility.reset();
     for (const group of groupFacesByPart(data.faces)) {
       const g = new THREE.BufferGeometry();
@@ -209,6 +212,7 @@ export class PlaybackScene {
       this.meshParts.push(group.part);
       this.group.add(this.faceMeshes.at(-1)!, this.wireMeshes.at(-1)!);
     }
+    this.applyVisibility();
 
     if (this.mode === "lattice") {
       const side = this.maxDim;

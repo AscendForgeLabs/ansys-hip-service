@@ -21,7 +21,9 @@ import { buildMeshData } from "./mesh";
 import type { MeshData } from "./mesh/types";
 import { PlaybackScene } from "./scene";
 import { STYLES } from "./styles";
-import { buildHud, configureHud, showError, showEmpty } from "./ui";
+import {
+  buildHud, configureHud, showError, showEmpty, resetChipStates, PART_LAYER_PREFIX,
+} from "./ui";
 import type { HudHandles } from "./ui";
 
 const ELEMENT_TAG = "hip-playback";
@@ -140,12 +142,14 @@ export class HipPlaybackElement extends HTMLElement {
     this.resizeObserver.observe(this);
   }
 
-  /** 断连重连后按既有网格重建场景(canvas WebGL 上下文随 dispose 释放)。 */
+  /** 断连重连后按既有网格重建场景(canvas WebGL 上下文随 dispose 释放)。
+   * 新场景显隐全部默认:chips 同步回全 on(resetChipStates),与画面一致。 */
   private rebuildScene(): void {
     if (!this.hud) return;
     try {
       this.scene = new PlaybackScene(this.hud.canvas);
       this.scene.setMesh(this.mesh!);
+      resetChipStates(this.hud.tagsRoot);
       this.scene.resize(this.clientWidth, this.clientHeight);
       this.refreshFrame();
     } catch {
@@ -217,11 +221,15 @@ export class HipPlaybackElement extends HTMLElement {
     this.maybeRenderDebugDump();
   }
 
-  /** HUD 副标题的构网路径标签:lattice / emap(hex)/ tet 皮肤(带部件数)。 */
+  /** HUD 副标题的构网路径标签:lattice / emap(hex)/ tet 皮肤(带部件数)。
+   * 正向按 cell 分支;未知档位走中性兜底,不冒充 hex 文案(防未来扩档漂移)。 */
   private subLabel(mesh: MeshData): string {
     if (mesh.mode === "lattice") return "规则格反推";
-    if (mesh.cell !== "tet") return "emap 通用构网";
-    return mesh.parts !== undefined ? `tet 皮肤 · ${mesh.parts.length} 部件` : "tet 皮肤";
+    if (mesh.cell === "hex") return "emap 通用构网";
+    if (mesh.cell === "tet") {
+      return mesh.parts !== undefined ? `tet 皮肤 · ${mesh.parts.length} 部件` : "tet 皮肤";
+    }
+    return "emap 构网";
   }
 
   private fail(err: unknown): void {
@@ -263,9 +271,13 @@ export class HipPlaybackElement extends HTMLElement {
       if (!chip || !layer) return;
       const on = !chip.classList.contains("on");
       chip.classList.toggle("on", on);
-      // part: 前缀 = 部件 chip(configureHud 动态建);其余为固定层 chip
-      if (layer.startsWith("part:")) {
-        this.scene?.setPartVisible(Number(layer.slice("part:".length)), on);
+      // part: 前缀 = 部件 chip(configureHud 动态建);畸形值忽略,其余为固定层 chip
+      if (layer.startsWith(PART_LAYER_PREFIX)) {
+        const rest = layer.slice(PART_LAYER_PREFIX.length);
+        const part = Number(rest);
+        if (rest !== "" && Number.isInteger(part)) {
+          this.scene?.setPartVisible(part, on);
+        }
       } else {
         this.scene?.setLayerVisible(layer as "shell" | "wire" | "ghost" | "punch", on);
       }

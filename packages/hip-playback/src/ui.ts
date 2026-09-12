@@ -40,6 +40,17 @@ const el = <K extends keyof HTMLElementTagNameMap>(
   return node;
 };
 
+/** 部件 chip 的 data-layer 前缀(生成端 configureHud 与消费端 element 委托共用)。 */
+export const PART_LAYER_PREFIX = "part:";
+
+/** 把 tagsRoot 下全部显隐 chip 恢复默认 on(换装/重连 = 显隐全默认;画面同态)。
+ * configureHud(重载)与 element.rebuildScene(重连)两处复用。 */
+export function resetChipStates(tagsRoot: HTMLElement): void {
+  for (const chip of tagsRoot.querySelectorAll<HTMLElement>(".hip-tag")) {
+    chip.classList.add("on");
+  }
+}
+
 function tagChip(label: string, layer: string, on = true): HTMLSpanElement {
   return el("span", { class: `hip-tag${on ? " on" : ""}`, "data-layer": layer }, label);
 }
@@ -118,13 +129,15 @@ export function configureHud(h: HudHandles, opts: {
   h.sub.textContent = opts.sub;
   h.note.textContent = opts.note;
   // 重载数据时先移除上一轮的动态 chip(cube 型 ghost/punch 与部件 chip;
-  // 避免重复累积;监听走容器委托不受影响)
+  // 避免重复累积;监听走容器委托不受影响),再把 shell/wire 静态 chip
+  // 补回 on —— 换装 = 显隐全默认,与场景复位后的画面一致
   h.tags.ghost?.remove();
   h.tags.punch?.remove();
   h.tags.ghost = null;
   h.tags.punch = null;
   for (const chip of h.partChips) chip.remove();
   h.partChips = [];
+  resetChipStates(h.tagsRoot);
   if (opts.mode === "lattice") {           // cube 型语义:参考轮廓 + 压头
     const ghost = tagChip("参考轮廓", "ghost");
     const punch = tagChip("压头", "punch");
@@ -133,7 +146,7 @@ export function configureHud(h: HudHandles, opts: {
     h.tags.shell.after(ghost, punch);
   }
   for (const id of opts.parts ?? []) {     // 部件 chip:接 tagsRoot 尾部,委托已覆盖
-    const chip = tagChip(`部件 ${id}`, `part:${id}`);
+    const chip = tagChip(`部件 ${id}`, `${PART_LAYER_PREFIX}${id}`);
     h.partChips.push(chip);
     h.tagsRoot.append(chip);
   }
