@@ -132,7 +132,7 @@ describe("parseEmapCsv", () => {
     expect(emap.elemIds).toEqual([101, 102]);
   });
 
-  it("13 列 tet10:cell='tet'、hasMidnodes=true,每单元 10 节点", () => {
+  it("11 列 tet10:cell='tet'、hasMidnodes=true,首列单元号、后 10 列节点", () => {
     const emap = parseEmapCsv(
       "elem,n1,n2,n3,n4,n5,n6,n7,n8,n9,n10\n" +
         "7, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10\n" +
@@ -145,12 +145,24 @@ describe("parseEmapCsv", () => {
     expect(emap.elemIds).toEqual([7, 8]);
   });
 
-  it("四档混宽 9↔13 → CsvError 带两宽度与分文件提示", () => {
+  it("13 列行属非法宽度:跳过 + warn,不定宽也不致命(13 非四档,系上游笔误)", () => {
+    const rows =
+      "elem,n1,n2,n3,n4,n5,n6,n7,n8\n" +
+      "1, 1, 2, 3, 4, 5, 6, 7, 8\n" +
+      "13, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12\n" +   // 13 列:已从合法档移除
+      "2, 9, 10, 11, 12, 13, 14, 15, 16\n";
+    const emap = parseEmapCsv(rows);
+    expect(emap.elements).toHaveLength(2);
+    expect(emap.elemIds).toEqual([1, 2]);
+    expect(emap.cell).toBe("hex");
+  });
+
+  it("四档混宽 9↔11 → CsvError 带两宽度与分文件提示", () => {
     const mixed =
       "elem,n1,n2,n3,n4,n5,n6,n7,n8\n" +
       "1, 1, 2, 3, 4, 5, 6, 7, 8\n" +
-      "2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20\n";
-    expect(() => parseEmapCsv(mixed)).toThrow(/列数 13 与首行 9 不一致/);
+      "2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18\n";
+    expect(() => parseEmapCsv(mixed)).toThrow(/列数 11 与首行 9 不一致/);
     expect(() => parseEmapCsv(mixed)).toThrow(/混合单元类型请分文件导出/);
   });
 

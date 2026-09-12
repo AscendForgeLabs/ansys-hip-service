@@ -19,11 +19,12 @@ export { buildMeshData } from "./mesh";
 export type { MeshData, MeshInput } from "./mesh/types";
 export {
   parseEmapCsv,
+  parseEpartCsv,
   parseFrameCsv,
   parseProgressCsv,
   parseResultsCsv,
 } from "./csv";
-export type { EmapTable, FrameNodes, StageRow, Vec6 } from "./csv";
+export type { EmapTable, EpartTable, FrameNodes, StageRow, Vec6 } from "./csv";
 export { segOf, depthAt, interpolateFrame } from "./playback-model";
 export { viridis, VIRIDIS_STOPS } from "./colormap";
 

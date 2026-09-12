@@ -256,6 +256,7 @@ describe("buildEmapMesh · 手造歪单单元(虚拟面心系数与绕向翻转)
     return fr;
   });
   const emap1: EmapTable = {
+    cell: "hex",
     elements: [Array.from({ length: 20 }, (_, i) => i + 1)],
     hasMidnodes: true,
   };
@@ -320,12 +321,13 @@ describe("buildEmapMesh · 错误路径", () => {
     const bad = [...emap.elements[0]!];
     bad[4] = 999;                              // n5 角点换成不存在的节点号
     expect(() =>
-      buildEmapMesh({ frames, emap: { elements: [bad], hasMidnodes: true } }),
+      buildEmapMesh({ frames, emap: { cell: "hex", elements: [bad], hasMidnodes: true } }),
     ).toThrow(/单元 1 引用了帧中不存在的节点 999/);
   });
 
   it("全部单元面被共享(重复单元)→ 无边界面 Error", () => {
     const dup: EmapTable = {
+      cell: "hex",
       elements: [emap.elements[0]!, emap.elements[0]!],
       hasMidnodes: true,
     };
@@ -338,7 +340,7 @@ describe("buildEmapMesh · 错误路径", () => {
 
   it("单元节点数与 hasMidnodes 不符 → Error", () => {
     expect(() =>
-      buildEmapMesh({ frames, emap: { elements: [[1, 2, 3]], hasMidnodes: false } }),
+      buildEmapMesh({ frames, emap: { cell: "hex", elements: [[1, 2, 3]], hasMidnodes: false } }),
     ).toThrow(/单元 1 应有 8 个节点,实际 3/);
   });
 
@@ -346,7 +348,7 @@ describe("buildEmapMesh · 错误路径", () => {
     const degenerate = [...emap.elements[0]!];
     degenerate[1] = degenerate[0]!;            // n2 = n1 → 面角点重合
     expect(() =>
-      buildEmapMesh({ frames, emap: { elements: [degenerate], hasMidnodes: true } }),
+      buildEmapMesh({ frames, emap: { cell: "hex", elements: [degenerate], hasMidnodes: true } }),
     ).toThrow(/退化/);
   });
 });

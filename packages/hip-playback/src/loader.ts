@@ -1,18 +1,19 @@
 /** 工件加载层 — 服务端 / 本地 File / 纯文本三入口,共用同一套文件名口径。
  *
- * 工件四类(docs/passthrough-guide.md / playback-handbook.md §1):
+ * 工件五类(docs/passthrough-guide.md / playback-handbook.md §1):
  *   frame_N.csv(位移帧,按 N 数字升序)/ progress.csv(阶段)/
- *   results.csv(结构化结果)/ emap.csv(单元连接表)。
- * progress/results/emap 缺席容忍(字段 undefined);一个帧都没有是错误,不静默。
+ *   results.csv(结构化结果)/ emap.csv(单元连接表)/ epart.csv(单元-part 归属侧车)。
+ * frame 外四类缺席容忍(字段 undefined);一个帧都没有是错误,不静默。
  */
 
 import {
   parseEmapCsv,
+  parseEpartCsv,
   parseFrameCsv,
   parseProgressCsv,
   parseResultsCsv,
 } from "./csv";
-import type { EmapTable, FrameNodes } from "./csv";
+import type { EmapTable, EpartTable, FrameNodes } from "./csv";
 
 export interface LoadedArtifacts {
   frames: FrameNodes[];            // 按帧号升序
@@ -20,10 +21,11 @@ export interface LoadedArtifacts {
   stageTimes?: number[];
   results?: Record<string, number>;
   emap?: EmapTable;
+  epart?: EpartTable;
 }
 
 const FRAME_NAME_RE = /^frame_(\d+)\.csv$/;
-const SIDELOAD_NAMES = ["progress.csv", "results.csv", "emap.csv"] as const;
+const SIDELOAD_NAMES = ["progress.csv", "results.csv", "emap.csv", "epart.csv"] as const;
 
 /** 从文件名集合发现帧文件,按帧号数字升序(拒绝字典序:frame_10 < frame_2)。 */
 function frameNamesSorted(names: readonly string[]): string[] {
@@ -55,6 +57,9 @@ function buildFromTexts(texts: Record<string, string>): LoadedArtifacts {
   }
   if (texts["emap.csv"] !== undefined) {
     loaded.emap = parseEmapCsv(texts["emap.csv"]);
+  }
+  if (texts["epart.csv"] !== undefined) {
+    loaded.epart = parseEpartCsv(texts["epart.csv"]);
   }
   return loaded;
 }
