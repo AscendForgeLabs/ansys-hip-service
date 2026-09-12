@@ -71,6 +71,28 @@ def test_preflight_rejects_non_get_methods(settings: Settings) -> None:
         assert get_preflight.headers["access-control-allow-methods"] == "GET"
 
 
+def test_preflight_logged_in_access_log(settings: Settings, tmp_path) -> None:
+    """回归:预检 OPTIONS 也必须落访问日志(中间件顺序,CORS 后挂会被短路)。"""
+    patched = settings.model_copy(update={
+        "access_log": settings.access_log.model_copy(
+            update={"file": str(tmp_path / "logs" / "access.log")}),
+        "server": settings.server.model_copy(
+            update={"cors_origins": ("http://front.example:3000",)}),
+    })
+    with TestClient(create_app(patched)) as client:
+        resp = client.options(
+            "/health",
+            headers={
+                "Origin": "http://front.example:3000",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert resp.status_code == 200
+    log_path = tmp_path / "logs" / "access.log"
+    assert log_path.is_file(), "访问日志未落盘"
+    assert "OPTIONS" in log_path.read_text(encoding="utf-8"), "预检未落访问日志"
+
+
 def test_env_override_comma_separated(monkeypatch) -> None:
     """HIP_SERVICE_CORS_ORIGINS 逗号分隔覆盖(空白容忍)。"""
     monkeypatch.setenv(

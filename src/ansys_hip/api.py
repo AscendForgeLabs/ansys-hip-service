@@ -159,16 +159,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.queue = queue
     # 请求访问日志(独立完整服务日志):先配置 logger 再挂中间件,全部请求落盘
     configure_access_logging(resolved_settings)
-    app.middleware("http")(make_access_log_middleware())
     # 开关式 CORS(server.cors_origins,默认空 = 不挂,行为不变):供前端页面
     # (如 hip-playback 回放组件)跨域拉取工件;只放行 GET(只读端点足够)。
-    # 挂在访问日志之后 → 访问日志在外层,预检 OPTIONS 也一字不漏地落日志。
+    # 注意挂载顺序:add_middleware 是前插(insert(0)),后挂者在外层 —— 访问日志
+    # 必须最后挂,预检 OPTIONS 才会被 CORSMiddleware 短路之前先落日志
+    # (实测:顺序反了预检不落日志,违背"全部请求一字不漏"承诺)。
     if resolved_settings.server.cors_origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(resolved_settings.server.cors_origins),
             allow_methods=["GET"],
         )
+    app.middleware("http")(make_access_log_middleware())
     app.include_router(_health_router(resolved_settings, queue))
     # sim 路由不统一打 tags:提交端点按方法组(注册表 GROUP_LABELS)折叠展示
     # (passthrough 手写路由,见 _sim_router)
