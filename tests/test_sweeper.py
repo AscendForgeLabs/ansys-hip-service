@@ -9,18 +9,22 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from ansys_hip.api import create_app
 from ansys_hip.settings import (
     ServiceLogConfig,
     Settings,
     StorageConfig,
     load_settings,
 )
+from ansys_hip import sweeper as sweeper_module
 from ansys_hip.sweeper import sweep_expired_jobs, sweep_expired_uploads
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -230,3 +234,71 @@ def test_terminal_missing_finished_at_falls_back(tmp_path):
 def test_sweep_expired_jobs_missing_root_returns_zero(tmp_path):
     assert sweep_expired_jobs(tmp_path / "missing", 3, frozenset()) == 0
     assert sweep_expired_uploads(tmp_path / "missing", retention_days=3) == 0
+
+
+# ---------------------------------------------------------------------------
+# 生命周期(StorageSweeper 经 lifespan 挂载:启动即刻轮 + 周期任务)
+# ---------------------------------------------------------------------------
+
+def with_storage(settings: Settings, **overrides) -> Settings:
+    """替换 storage 节字段的便捷拷贝(不可变模型,返回新实例)。"""
+    return settings.model_copy(
+        update={"storage": settings.storage.model_copy(update=overrides)}
+    )
+
+
+def test_startup_sweeper_removes_stale_dirs(settings_factory):
+    """进 lifespan 即触发一轮清扫:超期作业目录与上传被删(承接旧启动清扫语义)。"""
+    # Arrange
+    settings = settings_factory()
+    stale = make_job_dir(settings.jobs_root, "staleJob01", finished_at=STALE_ISO)
+    stale_upload = settings.uploads_root / "old.inp"
+    stale_upload.parent.mkdir(parents=True, exist_ok=True)
+    stale_upload.write_text("x", encoding="utf-8")
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=4)).timestamp()
+    os.utime(stale_upload, (old_ts, old_ts))
+
+    # Act / Assert
+    with TestClient(create_app(settings)):
+        assert not stale.exists()
+        assert not stale_upload.exists()
+
+
+def test_sweeper_task_not_created_when_periodic_disabled(settings_factory):
+    # Arrange(sweep_interval_s=0 且水位默认关 → 无后台任务,仅启动即刻轮)
+    settings = with_storage(settings_factory(), sweep_interval_s=0)
+    app = create_app(settings)
+
+    # Act / Assert
+    with TestClient(app):
+        assert app.state.sweeper.is_running is False
+
+
+def test_sweeper_task_stops_on_shutdown(settings_factory):
+    # Arrange
+    settings = with_storage(settings_factory(), sweep_interval_s=0.05)
+    app = create_app(settings)
+
+    # Act / Assert
+    with TestClient(app):
+        assert app.state.sweeper.is_running is True
+    assert app.state.sweeper.is_running is False
+
+
+def test_periodic_tick_survives_exception(settings_factory, monkeypatch, caplog):
+    """单周期故障仅记日志,任务继续(清扫是长跑保障,不能因一次 OSError 挂掉)。"""
+    # Arrange
+    def boom(settings: Settings, active_ids: frozenset[str]) -> None:
+        raise OSError("disk went away")
+
+    settings = with_storage(settings_factory(), sweep_interval_s=0.05)
+    app = create_app(settings)
+    with TestClient(app):
+        monkeypatch.setattr(sweeper_module, "run_sweep_once", boom)
+        time.sleep(0.4)
+
+        # Assert(任务仍活着,异常已落日志)
+        assert app.state.sweeper.is_running is True
+    assert any(
+        "清扫周期执行异常" in record.getMessage() for record in caplog.records
+    )

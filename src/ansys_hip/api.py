@@ -64,6 +64,7 @@ from .schemas import (
     UploadAccepted,
 )
 from .settings import Settings, load_settings
+from .sweeper import StorageSweeper
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """装配应用:配置 → 队列 → 路由。"""
     resolved_settings = settings if settings is not None else load_settings()
     queue = JobQueue(resolved_settings)
+    sweeper = StorageSweeper(resolved_settings, queue)
     _ensure_storage_dirs(resolved_settings)
 
     @asynccontextmanager
@@ -155,9 +157,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "仅限受控内网 + 明确信任上游"
             )
         await queue.start()
+        await sweeper.start()
         try:
             yield
         finally:
+            await sweeper.stop()
             await queue.stop()
 
     app = FastAPI(
@@ -168,6 +172,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved_settings
     app.state.queue = queue
+    app.state.sweeper = sweeper
     # 请求访问日志(独立完整服务日志):先配置 logger 再挂中间件,全部请求落盘
     configure_access_logging(resolved_settings)
     # 开关式 CORS(server.cors_origins,默认空 = 不挂,行为不变):供前端页面

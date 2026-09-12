@@ -22,13 +22,22 @@ cutoff,天然安全。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .queue import STATE_FILENAME, TERMINAL_STATUS_VALUES, load_state_payload, parse_iso
+from .queue import (
+    STATE_FILENAME,
+    TERMINAL_STATUS_VALUES,
+    JobQueue,
+    load_state_payload,
+    parse_iso,
+)
+from .settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -125,3 +134,82 @@ def sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
     if removed:
         logger.info("已清扫超期上传 %d 个(保留 %d 天)", removed, retention_days)
     return removed
+
+
+def run_sweep_once(settings: Settings, active_ids: frozenset[str]) -> None:
+    """一轮按天清扫(jobs + uploads);启动即刻轮与周期轮共用的入口。"""
+    retention_days = settings.storage.retention_days
+    sweep_expired_jobs(settings.jobs_root, retention_days, active_ids)
+    sweep_expired_uploads(settings.uploads_root, retention_days)
+
+
+# ---------------------------------------------------------------------------
+# 生命周期(后台任务;磁盘水位监控随后接入同一任务的双时钟)
+# ---------------------------------------------------------------------------
+
+# 周期循环的最小休眠(秒):防配置极小值时忙转
+_TICK_FLOOR_S = 0.1
+
+
+class StorageSweeper:
+    """周期清扫后台任务(生命周期由 FastAPI lifespan 管理)。
+
+    - start():先执行一轮即刻清扫(= 旧启动清扫语义 + 孤儿修复),
+      再按配置起后台任务(sweep_interval_s=0 → 不建任务);
+    - 每 tick 在事件循环线程现取 active_ids 快照,重活经 asyncio.to_thread
+      进线程池,不阻塞事件循环;
+    - 单周期故障仅记日志,任务继续(清扫是长跑保障,不能因一次 OSError 挂掉)。
+    """
+
+    def __init__(self, settings: Settings, queue: JobQueue) -> None:
+        self._settings = settings
+        self._queue = queue
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def is_running(self) -> bool:
+        """后台任务是否在跑(未配置周期 = 恒 False)。"""
+        return self._task is not None and not self._task.done()
+
+    async def start(self) -> None:
+        """启动即刻清扫一轮,再按配置起周期后台任务。"""
+        active = self._queue.active_job_ids()
+        await asyncio.to_thread(run_sweep_once, self._settings, active)
+        interval_s = self._settings.storage.sweep_interval_s
+        if interval_s <= 0:
+            logger.info("存储清扫:仅启动时执行一轮(sweep_interval_s=0)")
+            return
+        self._task = asyncio.create_task(self._run(), name="hip-storage-sweeper")
+        logger.info(
+            "存储清扫任务已启动(周期 %ds,作业根 %s)", interval_s, self._settings.jobs_root
+        )
+
+    async def stop(self) -> None:
+        """取消后台任务并等待收尸(幂等,未建任务时为空操作)。"""
+        task = self._task
+        if task is None:
+            return
+        self._task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _run(self) -> None:
+        interval_s = float(self._settings.storage.sweep_interval_s)
+        next_sweep = time.monotonic() + interval_s
+        while True:
+            now = time.monotonic()
+            await asyncio.sleep(max(next_sweep - now, _TICK_FLOOR_S))
+            now = time.monotonic()
+            try:
+                if now >= next_sweep:
+                    # 先排下一轮再执行:本周期抛错也按整周期退避,不刷屏重试
+                    next_sweep = now + interval_s
+                    active = self._queue.active_job_ids()
+                    await asyncio.to_thread(run_sweep_once, self._settings, active)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — 单周期故障不拖垮长跑任务
+                logger.exception("清扫周期执行异常,下一周期继续")
