@@ -8,7 +8,9 @@
 (无条件,失败作业也留排查证据)、results.csv(可选结构化结果,存在才发布)、
 progress.csv(阶段进度侧车,存在才发布)、declared_outputs;声明输出缺失 →
 KernelError(ARTIFACT_NOT_FOUND)在发布之后抛出 — 存在的产出与 job.out 已可下载。
-MAPDL 执行失败(runner 抛 KernelError)同样先发布入口与 job.out 再上抛。
+声明产出的认定 = 根部发布 **或** .inp 直写 artifacts/(上游模板惯例,文件
+本就在下载面;结构化 values 仍只看根部 results.csv)。MAPDL 执行失败
+(runner 抛 KernelError)同样先发布入口与 job.out 再上抛。
 
 结果 dict 契约:
     {fidelity: "passthrough", artifacts[], returncode, elapsed_s, values?}
@@ -31,7 +33,7 @@ from ..results import (
 )
 from ..runner import run_mapdl
 from ..schemas import RESERVED_JOB_DIR_NAMES, PassthroughParams, RunContext
-from . import publish_artifacts
+from . import artifact_dir, publish_artifacts
 
 
 def run_passthrough(params: PassthroughParams, ctx: RunContext) -> dict:
@@ -63,7 +65,17 @@ def run_passthrough(params: PassthroughParams, ctx: RunContext) -> dict:
         *params.declared_outputs,
     ]))
     published = publish_artifacts(ctx, candidates)
-    missing = [name for name in params.declared_outputs if name not in published]
+    # 上游惯例兼容:.inp 直写 artifacts/ 子目录的声明产出同样算已产出
+    # (artifacts/ 提交时为空,凡在必为本轮运行所写,无"输入自我满足"漏洞);
+    # 直写文件并入发布名单 — 它们本就在下载面
+    direct_written = [
+        name for name in params.declared_outputs
+        if name not in published and (artifact_dir(ctx) / name).is_file()
+    ]
+    missing = [
+        name for name in params.declared_outputs
+        if name not in published and name not in direct_written
+    ]
     if missing:
         raise KernelError(
             "ARTIFACT_NOT_FOUND",
@@ -72,7 +84,7 @@ def run_passthrough(params: PassthroughParams, ctx: RunContext) -> dict:
 
     result = {
         "fidelity": "passthrough",
-        "artifacts": published,
+        "artifacts": [*published, *direct_written],
         "returncode": outcome["returncode"],
         "elapsed_s": round(time.monotonic() - started, 3),
     }

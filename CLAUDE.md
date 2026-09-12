@@ -46,7 +46,7 @@ api.py(decorator 路由,统一错误体 ErrorBody{code,message};
 关键设计:
 
 - **内核契约**(见 `kernels/__init__.py` docstring):同步函数;返回 dict 必含 `fidelity`;用户可下载工件只写 `artifact_dir(ctx)`(= `job_dir/artifacts/`)且 `"artifacts"` 列**裸文件名**;主动失败抛 `KernelError(code, message)`。
-- **declared_outputs 契约**("服务无逻辑"的关键):上游声明作业结束应产出的裸文件名清单,缺一即 `KernelError("ARTIFACT_NOT_FOUND")`;MAPDL 在 job_dir 根写出的文件经 `publish_artifacts` 复制进 artifacts/。
+- **declared_outputs 契约**("服务无逻辑"的关键):上游声明作业结束应产出的裸文件名清单,缺一即 `KernelError("ARTIFACT_NOT_FOUND")`;认定 = 根部写出(经 `publish_artifacts` 复制进 artifacts/)**或** .inp 直写 artifacts/(上游模板惯例,提交时 artifacts/ 为空故无自我满足漏洞)。
 - **可选结构化结果**:.inp 在 job_dir 根写 `results.csv`(标签 ≤8 字符 + 数值)则解析进 result 的 `values: dict[str, float]`;缺席即无字段(纯搬运,不做物理解读)。
 - **阶段进度读时投影**:上游 .inp 约定用 `*CFOPEN` 覆盖式整文件重写 `progress.csv`(阶段标签 + 累计秒);`JobQueue.state()` 轮询时经 `results.parse_progress_csv` 投影进 `JobState.stages`(pending → None;running → 实时;终态 → 末帧)。无后台协程、无状态迁移、无竞态。
 - **作业列表与历史回退**:`GET /jobs` = `queue.list_jobs()`(内存活跃实时 + 盘上 state.json 只读 `JobSnapshot` 回退,按 created_at 倒序);`require_job` 同经 `queue.snapshot` — 服务重启后历史作业的状态/日志/结果/工件端点仍可用,`POST /jobs/{id}/cancel` 强制中断 pending/running 作业(killpg 同步执行,**保留作业目录供排障**,终态幂等);DELETE 对历史终态作业为纯目录清理;`GET /jobs/{id}/log?source=job.log|job.out` 白名单选源(运行中也可读根部实时 job.out)。

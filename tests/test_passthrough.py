@@ -647,6 +647,36 @@ def test_run_passthrough_failure_still_publishes_job_out(tmp_path: Path) -> None
     assert (artifacts_dir / "fail.inp").is_file()
 
 
+def test_run_passthrough_accepts_direct_written_artifacts(tmp_path: Path) -> None:
+    """上游惯例兼容:.inp 把声明产出直写 artifacts/ 子目录(而非根部)同样算
+    已产出 — 文件本就在下载面;artifacts/ 提交时为空,凡在必为本轮运行所写,
+    无"输入自我满足"漏洞(实测上游 hip-tc4-powder / hip-cube-fe 模板皆此写法,
+    曾整批被误判 ARTIFACT_NOT_FOUND)。根部与直写混合均认可。"""
+    job_dir = _make_job_dir(tmp_path)
+    entry = tmp_path / "direct.inp"
+    entry.write_text("/PREP7\n", encoding="utf-8")
+    bin_path = tmp_path / "ansys_direct"
+    _make_fake_ansys(
+        bin_path,
+        'echo "SOLUTION IS DONE" > "$out"\n'
+        "mkdir -p artifacts\n"
+        "touch root_out.csv\n"
+        "touch artifacts/direct_out.csv\n",
+    )
+
+    result = run_passthrough(
+        _kernel_params(entry, ["root_out.csv", "direct_out.csv"]),
+        _kernel_ctx(job_dir, bin_path),
+    )
+
+    assert result["returncode"] == 0
+    assert set(result["artifacts"]) == {
+        "direct.inp", "job.out", "root_out.csv", "direct_out.csv",
+    }
+    assert (job_dir / "artifacts" / "root_out.csv").is_file()   # 根部发布
+    assert (job_dir / "artifacts" / "direct_out.csv").is_file() # 直写即在
+
+
 def test_run_passthrough_without_results_csv_omits_values(tmp_path: Path) -> None:
     """results.csv 缺席 → 结果 dict 无 values 字段(可选契约,缺席不算错)。"""
     job_dir = _make_job_dir(tmp_path)
