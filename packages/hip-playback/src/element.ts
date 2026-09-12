@@ -171,6 +171,7 @@ export class HipPlaybackElement extends HTMLElement {
       this.mesh = buildMeshData({
         frames: art.frames as FrameNodes[],
         emap: art.emap,
+        epart: art.epart,
         stageLabels: art.stageLabels,
         stageTimes: art.stageTimes,
         results: art.results,
@@ -199,11 +200,14 @@ export class HipPlaybackElement extends HTMLElement {
       mode: this.mesh.mode,
       nverts: this.mesh.vertBase.length / 3,
       title: "HIP 三维回放",
-      sub: `${this.mesh.mode === "lattice" ? "规则格反推" : "emap 通用构网"} · `
+      // 副标题带单元形状档:emap 分支 hex/tet 分文案,tet 标注部件数(部件 chip 对应)
+      sub: `${this.subLabel(this.mesh)} · `
          + `${this.mesh.meta.nseg} 帧 · ${this.mesh.vertBase.length / 3} 顶点`,
       note: `数据:passthrough 工件 frame_1..${this.mesh.meta.nseg}.csv`
-          + `${this.mesh.mode === "emap" ? " + emap.csv" : ""}${resultsNote}`
+          + `${this.mesh.mode === "emap" ? " + emap.csv" : ""}`
+          + `${art.epart ? " + epart.csv" : ""}${resultsNote}`
           + ` · 变形倍率仅为可视化放大。`,
+      parts: this.mesh.parts,
     });
     hud.cmax.textContent = `${this.mesh.meta.colorMax.toFixed(2)} mm`;
     const tAttr = Number(this.getAttribute("t") ?? "0") || 0;
@@ -211,6 +215,13 @@ export class HipPlaybackElement extends HTMLElement {
     hud.timeline.value = String(this.tNow);
     hud.timeline.dispatchEvent(new Event("input"));   // 走统一刷新(含 HUD/时间轴)
     this.maybeRenderDebugDump();
+  }
+
+  /** HUD 副标题的构网路径标签:lattice / emap(hex)/ tet 皮肤(带部件数)。 */
+  private subLabel(mesh: MeshData): string {
+    if (mesh.mode === "lattice") return "规则格反推";
+    if (mesh.cell !== "tet") return "emap 通用构网";
+    return mesh.parts !== undefined ? `tet 皮肤 · ${mesh.parts.length} 部件` : "tet 皮肤";
   }
 
   private fail(err: unknown): void {
@@ -244,15 +255,20 @@ export class HipPlaybackElement extends HTMLElement {
       hud.play.textContent = this.playing ? "⏸ 暂停" : "▶ 播放";
     });
     hud.reset.addEventListener("click", () => this.resetView());
-    // 显隐 chip 事件委托:ghost/punch 在 configureHud 才创建(且每次重载会重建),
-    // 逐 chip 挂监听必漏 → 在容器上按 data-layer 分发
+    // 显隐 chip 事件委托:ghost/punch/部件 chip 在 configureHud 才创建(且每次
+    // 重载会重建),逐 chip 挂监听必漏 → 在容器上按 data-layer 分发
     hud.tagsRoot.addEventListener("click", (e) => {
       const chip = (e.target as HTMLElement).closest(".hip-tag") as HTMLSpanElement | null;
-      const layer = chip?.dataset.layer as "shell" | "wire" | "ghost" | "punch" | undefined;
+      const layer = chip?.dataset.layer;
       if (!chip || !layer) return;
       const on = !chip.classList.contains("on");
       chip.classList.toggle("on", on);
-      this.scene?.setLayerVisible(layer, on);
+      // part: 前缀 = 部件 chip(configureHud 动态建);其余为固定层 chip
+      if (layer.startsWith("part:")) {
+        this.scene?.setPartVisible(Number(layer.slice("part:".length)), on);
+      } else {
+        this.scene?.setLayerVisible(layer as "shell" | "wire" | "ghost" | "punch", on);
+      }
       this.needsRender = true;
     });
   }

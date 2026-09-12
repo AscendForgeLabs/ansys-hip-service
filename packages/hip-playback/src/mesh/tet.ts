@@ -195,6 +195,7 @@ export function buildTetMesh(input: MeshInput & { emap: EmapTable; epart?: Epart
     faces: shell.faces,
     stages: { ...buildStages(input, nseg), depth: depthSeries(frames) },
     mode: "emap",
+    cell: "tet",
     ...(input.epart ? { parts } : {}),
   };
 }

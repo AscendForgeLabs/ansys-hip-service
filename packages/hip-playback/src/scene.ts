@@ -9,13 +9,73 @@
 
 import * as THREE from "three";
 
-import type { MeshData } from "./mesh/types";
+import type { FaceGeom, MeshData } from "./mesh/types";
 import { depthAt, segOf } from "./playback-model";
 import { VIRIDIS_STOPS } from "./colormap";
 
 /** 压头几何口径:cube_dent 压头 4mm / 立方边 20mm;顶段高度 4mm。 */
 const PUNCH_WIDTH_RATIO = 0.2;
 const PUNCH_TOP = 4;
+
+/** 按部件分组的装配结果:组内索引拼接,装配为一个 Mesh + 一个 LineSegments。 */
+export interface PartGeomGroup {
+  part: number;                          // face.part ?? 0(无 epart 输入全部面同组)
+  tris: number[];                        // 组内全部面的三角形索引连接
+  wire: number[];                        // 组内全部面的网格线索引连接
+}
+
+/** faces → 按部件分组的索引装配(部件号升序;组序稳定)。
+ *
+ * 动机:真实 tet 作业边界面可达 1728 个,沿用"每面一个 Mesh"即 3456 个
+ * draw call;分部件合并后 = 部件数 × 2(外壳 + 网格线各一)。
+ * 无 epart 时全部面落第 0 组,装配退化为单 Mesh + 单 LineSegments ——
+ * 渲染观感与旧逐面装配等价(lattice/emap 单部件路径零回归)。
+ */
+export function groupFacesByPart(faces: readonly FaceGeom[]): PartGeomGroup[] {
+  const byPart = new Map<number, PartGeomGroup>();
+  for (const face of faces) {
+    const part = face.part ?? 0;
+    let group = byPart.get(part);
+    if (group === undefined) {
+      group = { part, tris: [], wire: [] };
+      byPart.set(part, group);
+    }
+    group.tris.push(...face.tris);
+    group.wire.push(...face.wire);
+  }
+  return [...byPart.values()].sort((a, b) => a.part - b.part);
+}
+
+/** 层 × 部件显隐状态:shell/wire 全量开关与 part 显隐正交(最终可见 =
+ * 层开 且 部件开;部件未记录 = 可见)。纯状态类,脱离 THREE 可单测。 */
+export class VisibilityState {
+  private shell = true;
+  private wire = true;
+  private readonly parts = new Map<number, boolean>();
+
+  setLayer(layer: "shell" | "wire", visible: boolean): void {
+    if (layer === "shell") this.shell = visible;
+    else this.wire = visible;
+  }
+
+  setPart(part: number, visible: boolean): void {
+    this.parts.set(part, visible);
+  }
+
+  faceVisible(part: number): boolean { return this.shell && this.partOn(part); }
+  wireVisible(part: number): boolean { return this.wire && this.partOn(part); }
+
+  /** 换装新网格时复位(默认全可见,与新 Mesh.visible 默认 true 同态)。 */
+  reset(): void {
+    this.shell = true;
+    this.wire = true;
+    this.parts.clear();
+  }
+
+  private partOn(part: number): boolean {
+    return this.parts.get(part) ?? true;
+  }
+}
 
 export interface FrameHud {
   uMax: number;          // 当前时刻 max|u|(mm)
@@ -37,8 +97,10 @@ export class PlaybackScene {
   private nseg = 0;
   private colorMax = 1;
   private stagesDepth: number[] = [0];
-  private faceMeshes: THREE.Mesh[] = [];
-  private wireMeshes: THREE.LineSegments[] = [];
+  private faceMeshes: THREE.Mesh[] = [];          // 每 part 一个(见 groupFacesByPart)
+  private wireMeshes: THREE.LineSegments[] = [];  // 同上,与 faceMeshes 同序
+  private meshParts: number[] = [];               // faceMeshes/wireMeshes 逐条的部件号
+  private readonly visibility = new VisibilityState();
   private ghost: THREE.LineSegments | null = null;
   private punch: THREE.Mesh | null = null;
   private punchWidth = 1;
@@ -129,17 +191,22 @@ export class PlaybackScene {
     const wireMat = new THREE.LineBasicMaterial({
       color: 0x9db0c3, transparent: true, opacity: 0.18,
     });
-    for (const face of data.faces) {
+    // 分部件合并装配:各组共享同一份 position/color/normal BufferAttribute,
+    // 仅三角/网格线索引不同(1728 边界面的 tet 作业 3456 → 部件数×2 draw call);
+    // 部件显隐状态随新网格复位(默认全可见)。
+    this.visibility.reset();
+    for (const group of groupFacesByPart(data.faces)) {
       const g = new THREE.BufferGeometry();
       g.setAttribute("position", this.posAttr);
       g.setAttribute("color", this.colAttr);
       g.setAttribute("normal", nrmAttr);
-      g.setIndex(face.tris);
+      g.setIndex(group.tris);
       this.faceMeshes.push(new THREE.Mesh(g, phong));
       const wg = new THREE.BufferGeometry();
       wg.setAttribute("position", this.posAttr);
-      wg.setIndex(face.wire);
+      wg.setIndex(group.wire);
       this.wireMeshes.push(new THREE.LineSegments(wg, wireMat));
+      this.meshParts.push(group.part);
       this.group.add(this.faceMeshes.at(-1)!, this.wireMeshes.at(-1)!);
     }
 
@@ -244,10 +311,27 @@ export class PlaybackScene {
   }
 
   setLayerVisible(layer: "shell" | "wire" | "ghost" | "punch", visible: boolean): void {
-    if (layer === "shell") { for (const m of this.faceMeshes) m.visible = visible; }
-    else if (layer === "wire") { for (const m of this.wireMeshes) m.visible = visible; }
-    else if (layer === "ghost" && this.ghost) this.ghost.visible = visible;
+    if (layer === "shell" || layer === "wire") {
+      this.visibility.setLayer(layer, visible);
+      this.applyVisibility();
+    } else if (layer === "ghost" && this.ghost) this.ghost.visible = visible;
     else if (layer === "punch" && this.punch) this.punch.visible = visible;
+  }
+
+  /** 部件显隐(HUD 部件 chip;与 shell/wire 层开关正交,见 VisibilityState)。 */
+  setPartVisible(part: number, visible: boolean): void {
+    this.visibility.setPart(part, visible);
+    this.applyVisibility();
+  }
+
+  /** 层 × 部件合成可见性落盘到逐 part 网格。 */
+  private applyVisibility(): void {
+    this.faceMeshes.forEach((m, i) => {
+      m.visible = this.visibility.faceVisible(this.meshParts[i]!);
+    });
+    this.wireMeshes.forEach((m, i) => {
+      m.visible = this.visibility.wireVisible(this.meshParts[i]!);
+    });
   }
 
   /** 顶点级对账 dump(与参考实现 #debug 同构;headless 验证/排查渲染问题用)。 */
@@ -310,6 +394,7 @@ export class PlaybackScene {
     if (this.punch) { this.group.remove(this.punch); this.punch.geometry.dispose(); (this.punch.material as THREE.Material).dispose(); }
     this.faceMeshes = [];
     this.wireMeshes = [];
+    this.meshParts = [];
     this.ghost = null;
     this.punch = null;
   }

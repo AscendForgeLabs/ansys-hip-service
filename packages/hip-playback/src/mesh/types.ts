@@ -33,6 +33,7 @@ export interface MeshData {
   framesU: number[][];                   // 每帧平铺位移 [ux,uy,uz]×N
   faces: FaceGeom[];
   parts?: number[];                      // 升序去重部件号(有 epart 输入时才有,tet 皮肤)
+  cell?: import("../csv").EmapCell;      // emap 路径单元形状档(hex/tet;lattice 缺席)
   stages: StageInfo;
   mode: "lattice" | "emap";
 }

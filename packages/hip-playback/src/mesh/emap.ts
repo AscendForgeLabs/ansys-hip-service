@@ -226,5 +226,6 @@ export function buildEmapMesh(input: MeshInput & { emap: EmapTable }): MeshData 
     faces: shell.faces,
     stages: { ...buildStages(input, nseg), depth: depthSeries(frames) },
     mode: "emap",
+    cell: "hex",
   };
 }

@@ -21,6 +21,7 @@ export interface HudHandles {
   tagsRoot: HTMLDivElement;               // 显隐 chip 容器(事件委托挂这里)
   tags: { shell: HTMLSpanElement; wire: HTMLSpanElement;
           ghost: HTMLSpanElement | null; punch: HTMLSpanElement | null };
+  partChips: HTMLSpanElement[];           // 部件 chip(tet + epart;configureHud 每轮重建)
   stage: HTMLDivElement;
   pv: HTMLSpanElement;                    // 压深数值
   seg: HTMLDivElement;                    // 阶段标签 · t=秒
@@ -99,32 +100,42 @@ export function buildHud(host: HTMLElement): HudHandles {
   return {
     root, canvas, state, panel, title, sub, timeline, scale, scalev, speed, speedv,
     play, reset, tagsRoot, tags: { shell: tagShell, wire: tagWire, ghost: null, punch: null },
+    partChips: [],
     stage, pv, seg, umax, cmax: cbarWrap.lastElementChild!.lastElementChild as HTMLSpanElement,
     note,
   };
 }
 
-/** 数据就绪后配置 HUD:nseg/标题/说明/通用或 cube 型标签。 */
+/** 数据就绪后配置 HUD:nseg/标题/说明/通用或 cube 型标签/部件 chip。 */
 export function configureHud(h: HudHandles, opts: {
   nseg: number; mode: "lattice" | "emap";
   nverts: number; title: string; sub: string; note: string;
+  parts?: number[];                        // 部件号清单(MeshData.parts;缺席/空 → 无 chip)
 }): void {
   h.state.hidden = true;
   h.timeline.max = String(opts.nseg);
   h.title.textContent = opts.title;
   h.sub.textContent = opts.sub;
   h.note.textContent = opts.note;
-  // 重载数据时先移除上一轮的 cube 型 chip(避免重复累积;监听走容器委托不受影响)
+  // 重载数据时先移除上一轮的动态 chip(cube 型 ghost/punch 与部件 chip;
+  // 避免重复累积;监听走容器委托不受影响)
   h.tags.ghost?.remove();
   h.tags.punch?.remove();
   h.tags.ghost = null;
   h.tags.punch = null;
+  for (const chip of h.partChips) chip.remove();
+  h.partChips = [];
   if (opts.mode === "lattice") {           // cube 型语义:参考轮廓 + 压头
     const ghost = tagChip("参考轮廓", "ghost");
     const punch = tagChip("压头", "punch");
     h.tags.ghost = ghost;
     h.tags.punch = punch;
     h.tags.shell.after(ghost, punch);
+  }
+  for (const id of opts.parts ?? []) {     // 部件 chip:接 tagsRoot 尾部,委托已覆盖
+    const chip = tagChip(`部件 ${id}`, `part:${id}`);
+    h.partChips.push(chip);
+    h.tagsRoot.append(chip);
   }
 }
 
