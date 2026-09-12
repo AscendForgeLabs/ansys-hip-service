@@ -101,7 +101,7 @@ def build_cdb(
     eb_count: int | None = None,
 ) -> str:
     """拼一份最小 cdb:ETBLOCK / NBLOCK / EBLOCK 三块,头部计数可注入错值。"""
-    et_entries = et_entries if et_entries is not None else [(1, "187"), (2, "CONTA174")]
+    et_entries = et_entries if et_entries is not None else [(1, "187"), (2, "174")]
     nb_lines = nb_lines if nb_lines is not None else [
         nblock_line(nid, *xyz) for nid, xyz in NODE_XYZ.items()
     ]
@@ -195,14 +195,23 @@ class TestHappyPath:
 
     def test_frame_tokens_passed_through_verbatim(self, tmp_path) -> None:
         """用例 6:E16.8 token 逐字符透传(0.30000000E+02 不能被重排成 30.0)。"""
-        csv_lines = [
-            "node x y",
+        passthrough_row = (
             "********  0.30000000E+02  0.30000000E+02  0.30000000E+02"
-            "  0.12345670E+01 -0.87654320E-02  0.45678900E+00",
+            "  0.12345670E+01 -0.87654320E-02  0.45678900E+00"
+        )
+        # 节点 1 坐标改为 (30,30,30) 与透传 token 对齐,其余节点保持原样
+        nb_lines = [
+            nblock_line(1, 30.0, 30.0, 30.0),
+            *[nblock_line(nid, *xyz) for nid, xyz in NODE_XYZ.items() if nid != 1],
         ]
-        node1 = nblock_line(1, 30.0, 30.0, 30.0)
-        cdb_text = build_cdb(nb_lines=[node1])
-        cdb_path, csv_path = write_inputs(tmp_path, cdb_text, "\n".join(csv_lines) + "\n")
+        csv_rows = [
+            build_nodes_csv().splitlines()[0],
+            passthrough_row,
+            *build_nodes_csv().splitlines()[2:],
+        ]
+        cdb_path, csv_path = write_inputs(
+            tmp_path, build_cdb(nb_lines=nb_lines), "\n".join(csv_rows) + "\n"
+        )
         rc, out = run_convert(tmp_path, cdb_path, csv_path)
 
         assert rc == 0
@@ -226,13 +235,13 @@ class TestParseCdb:
 
         cdb = parse_cdb(cdb_path)
 
-        assert cdb.etypes == {1: "187", 2: "CONTA174"}
+        assert cdb.etypes == {1: "187", 2: "174"}
         assert [el.eid for el in cdb.elements] == [1, 2, 3]
         assert cdb.elements[0].nodes == TET_A  # 续行 2 个节点被收进同一记录
         assert cdb.elements[1].nodes == TET_B
         assert cdb.elements[2].nodes == CONTACT_NODES
         assert cdb.elements[0].etype == "187"
-        assert cdb.elements[2].etype == "CONTA174"
+        assert cdb.elements[2].etype == "174"
         assert len(cdb.nodes) == len(NODE_XYZ)
         assert cdb.nodes[0].nid == 1 and cdb.nodes[13].nid == 14
 
@@ -263,7 +272,9 @@ class TestParseCdb:
 class TestExplicitFailures:
     def test_coordinate_mismatch_reports_row_and_both_values(self, tmp_path) -> None:
         rows = build_nodes_csv().splitlines()
-        rows[1] = rows[1].replace("1.00000000E+00", "9.00000000E+00")
+        # 行 2 = 节点 2(x=1.0):把 x token 改成 9.0 触发超差
+        rows[2] = rows[2].replace("1.00000000E+00", "9.00000000E+00")
+        assert rows[2] != build_nodes_csv().splitlines()[2]  # 确认替换生效
         cdb_path, csv_path = write_inputs(
             tmp_path, build_cdb(), "\n".join(rows) + "\n"
         )
@@ -272,7 +283,7 @@ class TestExplicitFailures:
             run_convert(tmp_path, cdb_path, csv_path)
 
         msg = str(excinfo.value)
-        assert "第 1 行" in msg and "x" in msg
+        assert "第 2 行" in msg and "x" in msg
         assert "9.0" in msg and "1.0" in msg  # 两侧值都报
 
     def test_row_count_mismatch_fails(self, tmp_path) -> None:
@@ -354,7 +365,12 @@ class TestContactAnchoring:
             (2, 2, 3, interior_contact),
         ]
         cdb_path, csv_path = write_inputs(
-            tmp_path, build_cdb(eb_records=records), build_nodes_csv()
+            tmp_path,
+            # ET 名用全名拼写,覆盖 TARGE170/CONTA174 形态的识别路径
+            build_cdb(
+                et_entries=[(1, "187"), (2, "CONTA174")], eb_records=records
+            ),
+            build_nodes_csv(),
         )
         rc, _out = run_convert(tmp_path, cdb_path, csv_path)
 
