@@ -4,7 +4,7 @@
 // 先 npm run build 产出 dist。
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { extname, isAbsolute, join, normalize, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));   // packages/hip-playback
@@ -24,7 +24,8 @@ createServer(async (req, res) => {
     let path = url.pathname;
     if (path.endsWith("/")) path += "index.html";           // 目录 → index.html
     const file = normalize(join(ROOT, path));               // 防穿越:必须仍在包根下
-    if (!file.startsWith(ROOT)) throw new Error("forbidden");
+    const rel = relative(ROOT, file);                       // startsWith 可被兄弟目录前缀绕过
+    if (rel.startsWith("..") || isAbsolute(rel)) throw new Error("forbidden");
     const body = await readFile(file);
     res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
     res.end(body);

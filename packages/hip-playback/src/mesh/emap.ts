@@ -195,7 +195,13 @@ function buildShell(
     if (existing !== undefined) return existing;   // 法线以首个使用该节点的面为准
     const idx = addVertex(
       posOf(first.get(nodeId)!),
-      frames.map((fr) => uOf(fr.get(nodeId)!)),
+      frames.map((fr) => {
+        const row = fr.get(nodeId);
+        if (row === undefined) {
+          throw new Error(`帧缺节点 ${nodeId}(各帧节点集应一致,emap 连接表引用了它)`);
+        }
+        return uOf(row);
+      }),
       normal,
     );
     vertByNode.set(nodeId, idx);

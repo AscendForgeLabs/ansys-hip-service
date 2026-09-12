@@ -5,6 +5,13 @@
  *       data-debug(顶点级对账 dump,排查/验收用)。
  * 方法:loadData(File[] | Record<文件名, 文本>)、play()、pause()、resetView()。
  * 事件:error(ErrorEvent,拉取/解析/构网失败;界面同时给中文错误态,不静默)。
+ *
+ * 生命周期要点(评审修复):
+ *   - shadowRoot 复用(`shadowRoot ?? attachShadow`):断连重连不二次 attachShadow;
+ *   - disconnect 只停循环/观察器/场景,**HUD DOM 保留**,重连轻量恢复;
+ *   - 装载数据建场景后立即 resize(RO 首帧通知先于场景存在,jobId 通道必踩);
+ *   - 显隐 chip 用 tags 容器事件委托(chip 在 configureHud 才创建,逐 chip 挂会漏);
+ *   - 渲染走脏标记(空闲不整帧渲染,长驻面板省 GPU)。
  */
 
 import type { FrameNodes } from "./csv";
@@ -33,6 +40,7 @@ export class HipPlaybackElement extends HTMLElement {
   private playing = false;
   private tNow = 0;
   private loadSeq = 0;                           // 装载序号:旧请求返回时丢弃,防竞态
+  private needsRender = true;                    // 脏标记:有更新才整帧渲染
 
   // ---- 属性(反映到 attribute,可声明式使用) ----
   get baseUrl(): string { return this.getAttribute("base-url") ?? ""; }
@@ -51,18 +59,19 @@ export class HipPlaybackElement extends HTMLElement {
   }
 
   connectedCallback(): void {
-    if (this.hud) return;                        // 幂等(重复 connect 不重建)
-    const root = this.attachShadow({ mode: "open" });
+    const root = this.shadowRoot ?? this.attachShadow({ mode: "open" });
+    if (this.hud) {                              // 重连:HUD 已在,轻量恢复
+      this.restartObservers();
+      this.startLoop();
+      if (this.mesh) this.rebuildScene();        // 旧场景已 dispose,按既有网格重建
+      return;
+    }
     const style = document.createElement("style");
     style.textContent = STYLES;
     root.append(style);
     this.hud = buildHud(this);
     this.wireEvents();
-    this.resizeObserver = new ResizeObserver((entries) => {
-      const rect = entries[0]?.contentRect;
-      if (rect) this.scene?.resize(rect.width, rect.height);
-    });
-    this.resizeObserver.observe(this);
+    this.restartObservers();
     this.startLoop();
     if (this.baseUrl && this.jobId) void this.autoLoad();
     else showEmpty(this.hud);
@@ -73,8 +82,8 @@ export class HipPlaybackElement extends HTMLElement {
     this.resizeObserver?.disconnect();
     this.scene?.dispose();
     this.scene = null;
-    this.hud = null;
-    this.loadSeq++;          // 在途装载回调全部失效(重挂载后旧数据不得回写已卸载的 shadow root)
+    this.loadSeq++;          // 在途装载回调全部失效(旧数据不得回写已卸载的元素)
+    // HUD DOM 保留在 shadow root,重连免重建
   }
 
   attributeChangedCallback(name: string, _old: string, _new: string): void {
@@ -115,9 +124,34 @@ export class HipPlaybackElement extends HTMLElement {
     if (this.hud) this.hud.play.textContent = "▶ 播放";
   }
 
-  resetView(): void { this.scene?.resetView(); }
+  resetView(): void { this.scene?.resetView(); this.needsRender = true; }
 
   // ---- 内部 ----
+
+  private restartObservers(): void {
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) {
+        this.scene?.resize(rect.width, rect.height);
+        this.needsRender = true;
+      }
+    });
+    this.resizeObserver.observe(this);
+  }
+
+  /** 断连重连后按既有网格重建场景(canvas WebGL 上下文随 dispose 释放)。 */
+  private rebuildScene(): void {
+    if (!this.hud) return;
+    try {
+      this.scene = new PlaybackScene(this.hud.canvas);
+      this.scene.setMesh(this.mesh!);
+      this.scene.resize(this.clientWidth, this.clientHeight);
+      this.refreshFrame();
+    } catch {
+      this.fail(new Error("当前浏览器环境不支持 WebGL,无法渲染 3D 回放"));
+    }
+  }
 
   private async autoLoad(): Promise<void> {
     const seq = ++this.loadSeq;
@@ -131,8 +165,8 @@ export class HipPlaybackElement extends HTMLElement {
   }
 
   private applyArtifacts(art: LoadedArtifacts): void {
-    if (!this.hud) return;   // 已断连(disconnectedCallback 置空),静默丢弃迟到数据
     const hud = this.hud;
+    if (!hud) return;        // 已断连,静默丢弃迟到数据
     try {
       this.mesh = buildMeshData({
         frames: art.frames as FrameNodes[],
@@ -154,6 +188,9 @@ export class HipPlaybackElement extends HTMLElement {
       }
     }
     this.scene.setMesh(this.mesh);
+    // RO 首帧通知先于场景存在(jobId 通道):装载后必须显式定尺寸,
+    // 否则画布停在 canvas 默认 300×150 缓冲被 CSS 拉伸(模糊+失真)
+    this.scene.resize(this.clientWidth, this.clientHeight);
     const resultsNote = this.mesh.meta.results["dent_dep"] !== undefined
       ? ` · 压深 ${this.mesh.meta.results["dent_dep"]} mm`
       : "";
@@ -177,9 +214,11 @@ export class HipPlaybackElement extends HTMLElement {
   }
 
   private fail(err: unknown): void {
+    const hud = this.hud;
     this.pause();
+    if (!hud) return;                           // 已断连:事件照发,界面无处可写
     const message = err instanceof Error ? err.message : String(err);
-    showError(this.hud!, `${message}(数据契约见 passthrough-guide.md / playback-handbook.md)`);
+    showError(hud, `${message}(数据契约见 passthrough-guide.md / playback-handbook.md)`);
     console.error("[hip-playback]", err);
     this.dispatchEvent(new ErrorEvent("error", {
       bubbles: false, composed: true,
@@ -205,37 +244,28 @@ export class HipPlaybackElement extends HTMLElement {
       hud.play.textContent = this.playing ? "⏸ 暂停" : "▶ 播放";
     });
     hud.reset.addEventListener("click", () => this.resetView());
-    hud.tags.shell.addEventListener("click", (e) => {
-      const chip = e.currentTarget as HTMLElement;
+    // 显隐 chip 事件委托:ghost/punch 在 configureHud 才创建(且每次重载会重建),
+    // 逐 chip 挂监听必漏 → 在容器上按 data-layer 分发
+    hud.tagsRoot.addEventListener("click", (e) => {
+      const chip = (e.target as HTMLElement).closest(".hip-tag") as HTMLSpanElement | null;
+      const layer = chip?.dataset.layer as "shell" | "wire" | "ghost" | "punch" | undefined;
+      if (!chip || !layer) return;
       const on = !chip.classList.contains("on");
       chip.classList.toggle("on", on);
-      this.scene?.setLayerVisible("shell", on);
+      this.scene?.setLayerVisible(layer, on);
+      this.needsRender = true;
     });
-    hud.tags.wire.addEventListener("click", (e) => {
-      const chip = e.currentTarget as HTMLElement;
-      const on = !chip.classList.contains("on");
-      chip.classList.toggle("on", on);
-      this.scene?.setLayerVisible("wire", on);
-    });
-    for (const chip of [hud.tags.ghost, hud.tags.punch]) {
-      chip?.addEventListener("click", () => {
-        const on = !chip.classList.contains("on");
-        chip.classList.toggle("on", on);
-        const layer = chip === hud.tags.ghost ? "ghost" : "punch";
-        this.scene?.setLayerVisible(layer as "ghost" | "punch", on);
-      });
-    }
   }
 
   private refreshFrame(): void {
-    if (!this.scene || !this.mesh) return;
-    const hud = this.hud!;
+    if (!this.scene || !this.mesh || !this.hud) return;
     const { uMax, depth } = this.scene.update(this.tNow, this.scale);
-    hud.pv.textContent = depth.toFixed(2);
     const k = Math.min(Math.round(this.tNow), this.mesh.stages.label.length - 1);
-    hud.seg.textContent =
+    this.hud.pv.textContent = depth.toFixed(2);
+    this.hud.seg.textContent =
       `${this.mesh.stages.label[k]} · t=${this.mesh.stages.time[k]} s`;
-    hud.umax.textContent = `max|u| = ${uMax.toFixed(3)} mm`;
+    this.hud.umax.textContent = `max|u| = ${uMax.toFixed(3)} mm`;
+    this.needsRender = true;
   }
 
   private startLoop(): void {
@@ -251,7 +281,11 @@ export class HipPlaybackElement extends HTMLElement {
         }
       }
       this.lastTs = ts;
-      this.scene?.render();
+      // 脏标记渲染:播放中每帧,空闲时仅在有更新/相机拖转(scene 内部置脏)时渲染
+      if (this.scene && (this.playing || this.needsRender || this.scene.consumeDirty())) {
+        this.scene.render();
+        this.needsRender = false;
+      }
       this.rafId = requestAnimationFrame(loop);
     };
     this.rafId = requestAnimationFrame(loop);

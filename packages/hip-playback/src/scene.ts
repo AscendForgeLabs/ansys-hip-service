@@ -46,6 +46,7 @@ export class PlaybackScene {
   private bboxMax = new THREE.Vector3();
   private maxDim = 20;                     // 包围盒最大边长(相机尺度基准)
   private mode: "lattice" | "emap" = "lattice";
+  private dirty = true;                    // 相机/数据变动标记(空闲时免整帧渲染)
 
   // 轨道相机(拖转 + 滚轮;参数与参考实现同款,尺度按包围盒自适应)
   private yaw = 0.62;
@@ -60,12 +61,14 @@ export class PlaybackScene {
     this.yaw += (e.clientX - this.drag[0]) * 0.008;
     this.pitch = Math.max(-0.05, Math.min(1.35, this.pitch + (e.clientY - this.drag[1]) * 0.006));
     this.drag = [e.clientX, e.clientY];
+    this.dirty = true;
   };
   private readonly onDragEnd = (): void => { this.drag = null; };
   private readonly onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     this.dist = Math.max(
       this.distMin, Math.min(this.distMax, this.dist * (e.deltaY > 0 ? 1.08 : 0.93)));
+    this.dirty = true;
   };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -195,6 +198,7 @@ export class PlaybackScene {
     }
     this.posAttr!.needsUpdate = true;
     this.colAttr!.needsUpdate = true;
+    this.dirty = true;
 
     const depth = depthAt(t, this.nseg, this.stagesDepth);
     if (this.punch) {                       // 压头底面跟随压深,顶段始终露在立方上方
@@ -204,6 +208,13 @@ export class PlaybackScene {
         this.center.x, this.bboxMax.y - scale * depth + ph / 2, this.center.z);
     }
     return { uMax, depth };
+  }
+
+  /** 相机/数据是否待渲染(消费即清;渲染循环空闲时凭此免整帧渲染)。 */
+  consumeDirty(): boolean {
+    const value = this.dirty;
+    this.dirty = false;
+    return value;
   }
 
   render(): void {
@@ -217,6 +228,7 @@ export class PlaybackScene {
   }
 
   resetView(): void {
+    this.dirty = true;
     this.yaw = 0.62;
     this.pitch = 0.95;
     // 参考实现口径:side 20 → dist 95(4.75×),钳在 [2.25×, 20×]
@@ -228,6 +240,7 @@ export class PlaybackScene {
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.dirty = true;
   }
 
   setLayerVisible(layer: "shell" | "wire" | "ghost" | "punch", visible: boolean): void {

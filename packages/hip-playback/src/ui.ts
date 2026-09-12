@@ -18,6 +18,7 @@ export interface HudHandles {
   speedv: HTMLSpanElement;
   play: HTMLButtonElement;
   reset: HTMLButtonElement;
+  tagsRoot: HTMLDivElement;               // 显隐 chip 容器(事件委托挂这里)
   tags: { shell: HTMLSpanElement; wire: HTMLSpanElement;
           ghost: HTMLSpanElement | null; punch: HTMLSpanElement | null };
   stage: HTMLDivElement;
@@ -38,8 +39,8 @@ const el = <K extends keyof HTMLElementTagNameMap>(
   return node;
 };
 
-function tagChip(label: string, on = true): HTMLSpanElement {
-  return el("span", { class: `hip-tag${on ? " on" : ""}` }, label);
+function tagChip(label: string, layer: string, on = true): HTMLSpanElement {
+  return el("span", { class: `hip-tag${on ? " on" : ""}`, "data-layer": layer }, label);
 }
 
 /** 建空态骨架(数据加载完成后再 configure 填 nseg/结果/文案)。 */
@@ -56,8 +57,9 @@ export function buildHud(host: HTMLElement): HudHandles {
   const speedv = el("span", { style: "font-size:11px;width:46px" }, "8 s/程");
   const play = el("button", {}, "▶ 播放");
   const reset = el("button", {}, "复位视角");
-  const tagShell = tagChip("外壳");
-  const tagWire = tagChip("网格线");
+  const tagShell = tagChip("外壳", "shell");
+  const tagWire = tagChip("网格线", "wire");
+  const tagsRoot = el("div", { class: "hip-row hip-tags", id: "hip-tags" }, tagShell, tagWire);
 
   const cbarWrap = el("div", { class: "hip-cbar-wrap" },
     el("div", { class: "hip-cbar" }),
@@ -71,7 +73,7 @@ export function buildHud(host: HTMLElement): HudHandles {
     el("div", { class: "hip-row" }, el("label", {}, "变形倍率"), scale, scalev),
     el("div", { class: "hip-row" }, el("label", {}, "回放速度"), speed, speedv),
     el("div", { class: "hip-row", style: "gap:6px" }, play, reset),
-    el("div", { class: "hip-row hip-tags", id: "hip-tags" }, tagShell, tagWire),
+    tagsRoot,
     el("div", { class: "hip-row", style: "margin-bottom:0" }, cbarWrap),
   );
 
@@ -96,7 +98,7 @@ export function buildHud(host: HTMLElement): HudHandles {
   root.append(canvas, panel, stage, bar, state);
   return {
     root, canvas, state, panel, title, sub, timeline, scale, scalev, speed, speedv,
-    play, reset, tags: { shell: tagShell, wire: tagWire, ghost: null, punch: null },
+    play, reset, tagsRoot, tags: { shell: tagShell, wire: tagWire, ghost: null, punch: null },
     stage, pv, seg, umax, cmax: cbarWrap.lastElementChild!.lastElementChild as HTMLSpanElement,
     note,
   };
@@ -112,9 +114,14 @@ export function configureHud(h: HudHandles, opts: {
   h.title.textContent = opts.title;
   h.sub.textContent = opts.sub;
   h.note.textContent = opts.note;
+  // 重载数据时先移除上一轮的 cube 型 chip(避免重复累积;监听走容器委托不受影响)
+  h.tags.ghost?.remove();
+  h.tags.punch?.remove();
+  h.tags.ghost = null;
+  h.tags.punch = null;
   if (opts.mode === "lattice") {           // cube 型语义:参考轮廓 + 压头
-    const ghost = tagChip("参考轮廓");
-    const punch = tagChip("压头");
+    const ghost = tagChip("参考轮廓", "ghost");
+    const punch = tagChip("压头", "punch");
     h.tags.ghost = ghost;
     h.tags.punch = punch;
     h.tags.shell.after(ghost, punch);
