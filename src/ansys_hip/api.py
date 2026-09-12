@@ -65,6 +65,7 @@ from .schemas import (
 )
 from .settings import Settings, load_settings
 from .sweeper import StorageSweeper
+from .uvicorn_log import configure_uvicorn_logging
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.sweeper = sweeper
     # 请求访问日志(独立完整服务日志):先配置 logger 再挂中间件,全部请求落盘
     configure_access_logging(resolved_settings)
+    # 服务运行日志接管(uvicorn + 应用 logger → service_log,按天轮转):
+    # 取代启动命令的 shell 重定向;uvicorn.access 与自研访问日志重复故静默
+    configure_uvicorn_logging(resolved_settings)
     # 开关式 CORS(server.cors_origins,默认空 = 不挂,行为不变):供前端页面
     # (如 hip-playback 回放组件)跨域拉取工件;只放行 GET(只读端点足够)。
     # 注意挂载顺序:add_middleware 是前插(insert(0)),后挂者在外层 —— 访问日志
