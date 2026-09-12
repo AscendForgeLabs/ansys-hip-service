@@ -246,6 +246,9 @@ function jobRow(job) {
   row.appendChild(el("td", null, stageSummary(job.stages)));
   row.appendChild(el("td", "mono", job.error ? job.error.code : ""));
   const actions = el("td");
+  if (!TERMINAL_STATUSES.includes(job.status)) {
+    actions.appendChild(stopButton(job));
+  }
   const button = el("button", "btn", "详情");
   button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -260,6 +263,32 @@ function jobRow(job) {
 function visibleJobs() {
   if (state.filter === "all") return state.jobs;
   return state.jobs.filter((job) => job.status === state.filter);
+}
+
+// 强制中断按钮:POST /jobs/{id}/cancel(killpg 同步执行,最坏 ~5s,期间按钮
+// 置灰防重复提交);中断保留现场,失败经错误条提示
+function stopButton(job) {
+  const button = el("button", "btn btn-stop", "强制中断");
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    button.textContent = "中断中…";
+    try {
+      const resp = await fetch("/jobs/" + job.id + "/cancel", { method: "POST" });
+      if (!resp.ok) throw await readErrorBody(resp);
+    } catch (err) {
+      showError("强制中断失败:" + err.message);
+      button.disabled = false;
+      button.textContent = "强制中断";
+      return;
+    }
+    try {
+      await refreshJobs();
+    } catch (err) {
+      showError("刷新作业列表失败:" + err.message);
+    }
+  });
+  return button;
 }
 
 function renderJobs() {

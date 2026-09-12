@@ -39,7 +39,7 @@ passthrough 是**唯一提交通道**(`POST /sim/passthrough`,结果
 |---|---|
 | 文件接收 | `POST /uploads/apdl` 收 .inp/.cdb/.mac/.csv/.txt,落到服务端存储 |
 | 异步作业 | 提交 202 受理 → 单并发队列(`max_concurrent=1`)→ 状态机 |
-| 超时与取消 | `timeout_s` 上限保护;`DELETE /jobs/{id}` 取消并清理(kill 进程组) |
+| 超时与取消 | `timeout_s` 上限保护;`DELETE /jobs/{id}` 取消并清理(kill 进程组);`POST /jobs/{id}/cancel` 强制中断但保留现场 |
 | 阶段进度 | 读 `progress.csv` 侧车,`GET /jobs/{id}` 的 `stages` 实时投影(§4.4) |
 | 工件交付 | 声明输出 + `job.out` 自动发布进 `artifacts/`,流式下载 |
 | 诊断阶梯 | 许可 → job.out 错误行 → 内部错误,统一错误码(§3.7) |
@@ -162,6 +162,7 @@ passthrough 是**唯一提交通道**(`POST /sim/passthrough`,结果
 | `/jobs/{id}/log` | GET | 作业日志纯文本;`?source=job.log\|job.out` 选源,`?tail=N` 取尾 |
 | `/jobs/{id}/artifacts` | GET | 工件文件名数组 |
 | `/jobs/{id}/artifacts/{name}` | GET | 流式下载单个工件 |
+| `/jobs/{id}/cancel` | POST | 强制中断 pending/running 作业:终止进程组(SIGTERM→SIGKILL)并置 cancelled,**保留作业目录/job.out/日志供排障**;终态作业幂等返回当前状态 |
 | `/jobs/{id}` | DELETE | 取消并清理(终止进程组;对历史终态作业为纯目录清理) |
 | `/service/log` | GET | 服务请求日志尾部(运维向,`?tail=N`) |
 

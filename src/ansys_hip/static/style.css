@@ -98,6 +98,9 @@ body {
   cursor: pointer;
 }
 .btn:hover { background: var(--gray-bg); }
+.btn-stop { color: var(--red); }
+.btn-stop:hover { background: var(--red-bg); }
+.btn-stop:disabled { color: var(--muted); cursor: default; }
 
 /* ===== 作业表 ===== */
 .table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }

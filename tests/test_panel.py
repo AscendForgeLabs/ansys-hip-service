@@ -52,3 +52,11 @@ def test_openapi_includes_new_paths(settings: Settings) -> None:
     source_param = paths["/jobs/{job_id}/log"]["get"].get("parameters", [])
     by_name = {param.get("name"): param for param in source_param}
     assert by_name.get("source", {}).get("description"), "source 参数应带描述"
+
+
+def test_openapi_includes_cancel_endpoint(settings: Settings) -> None:
+    """openapi 内省:强制中断端点在册且带描述(保留现场语义进 Swagger)。"""
+    spec = create_app(settings).openapi()
+    cancel = spec["paths"]["/jobs/{job_id}/cancel"]["post"]
+    assert cancel.get("summary"), "cancel 端点应带 summary"
+    assert "保留" in cancel.get("description", ""), "cancel 描述应写明保留现场语义"

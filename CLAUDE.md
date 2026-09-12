@@ -49,11 +49,11 @@ api.py(decorator 路由,统一错误体 ErrorBody{code,message};
 - **declared_outputs 契约**("服务无逻辑"的关键):上游声明作业结束应产出的裸文件名清单,缺一即 `KernelError("ARTIFACT_NOT_FOUND")`;MAPDL 在 job_dir 根写出的文件经 `publish_artifacts` 复制进 artifacts/。
 - **可选结构化结果**:.inp 在 job_dir 根写 `results.csv`(标签 ≤8 字符 + 数值)则解析进 result 的 `values: dict[str, float]`;缺席即无字段(纯搬运,不做物理解读)。
 - **阶段进度读时投影**:上游 .inp 约定用 `*CFOPEN` 覆盖式整文件重写 `progress.csv`(阶段标签 + 累计秒);`JobQueue.state()` 轮询时经 `results.parse_progress_csv` 投影进 `JobState.stages`(pending → None;running → 实时;终态 → 末帧)。无后台协程、无状态迁移、无竞态。
-- **作业列表与历史回退**:`GET /jobs` = `queue.list_jobs()`(内存活跃实时 + 盘上 state.json 只读 `JobSnapshot` 回退,按 created_at 倒序);`require_job` 同经 `queue.snapshot` — 服务重启后历史作业的状态/日志/结果/工件端点仍可用,DELETE 对历史终态作业为纯目录清理;`GET /jobs/{id}/log?source=job.log|job.out` 白名单选源(运行中也可读根部实时 job.out)。
+- **作业列表与历史回退**:`GET /jobs` = `queue.list_jobs()`(内存活跃实时 + 盘上 state.json 只读 `JobSnapshot` 回退,按 created_at 倒序);`require_job` 同经 `queue.snapshot` — 服务重启后历史作业的状态/日志/结果/工件端点仍可用,`POST /jobs/{id}/cancel` 强制中断 pending/running 作业(killpg 同步执行,**保留作业目录供排障**,终态幂等);DELETE 对历史终态作业为纯目录清理;`GET /jobs/{id}/log?source=job.log|job.out` 白名单选源(运行中也可读根部实时 job.out)。
 - **运维面**:`GET /panel` 自托管单页面板(`src/ansys_hip/static/`,零构建原生 JS,内网免鉴权);请求访问日志经 `access_log.py` 中间件全量记录(`TimedRotatingFileHandler` 按天轮转,默认保 14 天,落 `var/logs/access.log`),`GET /service/log` 尾读。
 - **前端回放组件**:`packages/hip-playback/` — 帧工件 → `<hip-playback>` 即插即用 3D 回放 Web Component(three r128 单文件,浏览器侧构网:emap 通用 + 规则格反推双路径);跨域拉取经 `server.cors_origins`(默认关,只放行 GET);详见 `docs/playback-handbook.md` §5 与包内 README。
 - **作业目录** `var/jobs/<id>/`:`state.json` / `resolved-params.json` / `result.json` / `job.log` / `artifacts/` / MAPDL 的 `job.out`/`launcher.log`(外部读取面:工件下载仅限 `artifacts/`;`job.log`/`job.out` 经日志端点 `?source=` 白名单可读纯文本,`launcher.log` 与其余根部簿记文件不对外;`RESERVED_JOB_DIR_NAMES` 钉测防上传文件撞名)。重启时遗留 pending/running → failed;超保留期目录自动清扫。
-- **runner.py 诊断阶梯**:许可错误(LICENSE_UNAVAILABLE)→ job.out ERROR 行/非零退出(CONVERGENCE_FAILED)→ 正常结束但异常(INTERNAL)。进程用独立进程组,取消 = killpg;`required_outputs` 缺件检查由内核按 declared_outputs 自行判定(runner 默认 None)。
+- **runner.py 诊断阶梯**:许可错误(LICENSE_UNAVAILABLE)→ job.out `*** ERROR ***`/`*** FATAL ***` 标记行/非零退出(CONVERGENCE_FAILED;诊断读对超 16MB 的 job.out 只取首 2MB + 尾 14MB,防 NERR 失控输出整读进内存)→ 正常结束但异常(INTERNAL)。进程用独立进程组,取消 = killpg;`required_outputs` 缺件检查由内核按 declared_outputs 自行判定(runner 默认 None)。
 - **超时** = min(用户 `timeout_s`, 全局 `job_timeout_s`),经 `ctx.model_copy` 传内核,queue 层零特判。
 
 ## 领域约束(改 passthrough / 解析器 / 示范 .inp 前必读)
@@ -63,6 +63,7 @@ api.py(decorator 路由,统一错误体 ErrorBody{code,message};
 - **runner 的 cwd=job_dir** 是上游 .inp 相对引用(`CDREAD` 等)的依赖,写进契约即为承诺。
 - **`-j` 作业名固定 `hipjob`**(job_id 含 `-`/`_` 不适合作 MAPDL 文件名前缀)。
 - 单位制(mm/MPa/s/℃)责任归上游 .inp,服务不做任何换算。
+- **job.out 启动横幅 `Opening new LOG, ERROR, LOCK and PAGE FILES` 含 "ERROR" 字样**(指 .err 文件,每个 job.out 头部都有);错误行判定必须钉 `*** ERROR ***` 完整标记,裸子串匹配会把退出码 0 的干净作业整批判失败。
 
 ## 测试
 

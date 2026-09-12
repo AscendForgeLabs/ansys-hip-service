@@ -618,6 +618,21 @@ def _jobs_router(queue: JobQueue) -> APIRouter:
         queue.remove(job_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+    @router.post(
+        "/{job_id}/cancel",
+        response_model=JobState,
+        summary="取消/强制中断作业(保留现场)",
+        responses={404: {"model": ErrorBody, "description": "作业不存在"}},
+    )
+    def cancel_job(job_id: str = PathParam(description="作业 ID")) -> JobState:
+        """强制中断 pending/running 作业:终止 MAPDL 进程组(SIGTERM → 宽限 →
+        SIGKILL)并置 cancelled,响应返回即进程树已死。与 DELETE 的区别:
+        **不清理作业目录** — state.json/job.log/job.out 全部保留供排障
+        (NERR 失控、进程挂死等事故的现场取证)。终态作业幂等返回当前状态。"""
+        require_job(job_id, include_stages=False)
+        queue.cancel(job_id)
+        return require_job(job_id).state
+
     return router
 
 

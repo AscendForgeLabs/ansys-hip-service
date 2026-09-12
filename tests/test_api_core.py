@@ -433,6 +433,53 @@ def test_delete_running_job_cancels_and_next_job_runs(
     assert second_final["status"] == "succeeded"
 
 
+def test_cancel_running_job_preserves_dir_and_queue_continues(
+    enabled_client, fake_executors, enabled_settings
+):
+    # Arrange — 与 DELETE 的关键差异:中断保留排障现场(目录/state.json/job.log)
+    fake_executors["passthrough"] = FakeKernel(delay_s=6.0)
+
+    # Act
+    payload = passthrough_payload(enabled_settings)
+    first = submit(enabled_client, "passthrough", payload)
+    second = submit(enabled_client, "passthrough", payload)
+    wait_for_status(enabled_client, first["id"], "running")
+    cancel_response = enabled_client.post(f"/jobs/{first['id']}/cancel")
+    second_final = wait_for_terminal(enabled_client, second["id"])
+
+    # Assert — 响应即取消后的状态;作业目录保留;队列继续处理后续作业
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"] == "cancelled"
+    job_dir = enabled_settings.jobs_root / first["id"]
+    assert (job_dir / "state.json").is_file()
+    assert (job_dir / "job.log").is_file()
+    assert enabled_client.get(f"/jobs/{first['id']}").json()["status"] == "cancelled"
+    assert second_final["status"] == "succeeded"
+
+
+def test_cancel_terminal_job_is_idempotent_noop(enabled_client, fake_executors):
+    # Arrange — 已成功作业再 cancel:幂等返回当前状态,不迁移
+    fake_executors["passthrough"] = FakeKernel()
+    payload = passthrough_payload(enabled_client.app.state.settings)
+    accepted = submit(enabled_client, "passthrough", payload)
+    final = wait_for_terminal(enabled_client, accepted["id"])
+    assert final["status"] == "succeeded"
+
+    # Act
+    cancel_response = enabled_client.post(f"/jobs/{accepted['id']}/cancel")
+
+    # Assert
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"] == "succeeded"
+
+
+def test_cancel_missing_job_returns_404(enabled_client) -> None:
+    # Act / Assert
+    response = enabled_client.post("/jobs/nonexistent/cancel")
+    assert response.status_code == 404
+    assert response.json()["code"] == "JOB_NOT_FOUND"
+
+
 # ---------------------------------------------------------------------------
 # 工件安全
 # ---------------------------------------------------------------------------
