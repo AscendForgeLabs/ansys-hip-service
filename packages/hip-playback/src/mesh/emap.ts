@@ -19,12 +19,22 @@
  *     被多面引用时静态法线以首个使用的面为准(共享 BufferAttribute 口径)。
  *   * wire 网格线:线性面 = 4 条角点棱;二次面 = 角点→中点→角点两段
  *     (hex20 的网格线观感)。
+ *
+ * 向量算术与法线定向核抽在 src/mesh/vec3.ts(与 tet 皮肤构网共享);
+ * tet 四面体分支见 src/mesh/tet.ts。
  */
-import type { EmapTable, FrameNodes, Vec6 } from "../csv";
+import type { EmapTable, FrameNodes } from "../csv";
 import { buildStages, colorMaxOf, depthSeries, round4, round5 } from "./common";
 import type { FaceGeom, MeshData, MeshInput } from "./types";
-
-type Vec3 = readonly [number, number, number];
+import {
+  bboxMaxSide,
+  mean3,
+  orientNormal,
+  posOf,
+  sub3,
+  uOf,
+  type Vec3,
+} from "./vec3";
 
 /** SOLID186 六面体面表(1 基角点号):底面、顶面、4 个侧面。 */
 const HEX_FACES: ReadonlyArray<readonly [number, number, number, number]> = [
@@ -52,30 +62,12 @@ const FACE_MID_COLS: ReadonlyArray<readonly [number, number, number, number]> =
     MID_COL_BY_EDGE.get(`${Math.min(d, a)}-${Math.max(d, a)}`)!,
   ]);
 
-/** 法线长度低于此值视为退化面(角点共线/重合,无法定向)。 */
-const DEGENERATE_EPS = 1e-12;
-
 /** 边界面:角点/棱中点节点号(沿面序)+ 所属单元中心(绕向参照)。 */
 interface BoundaryFace {
   corners: readonly number[];
   mids: readonly number[];
   elemCenter: Vec3;
 }
-
-const sub3 = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const cross3 = (a: Vec3, b: Vec3): Vec3 => [
-  a[1] * b[2] - a[2] * b[1],
-  a[2] * b[0] - a[0] * b[2],
-  a[0] * b[1] - a[1] * b[0],
-];
-const dot3 = (a: Vec3, b: Vec3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const mean3 = (vs: ReadonlyArray<Vec3>): Vec3 => [
-  vs.reduce((s, v) => s + v[0], 0) / vs.length,
-  vs.reduce((s, v) => s + v[1], 0) / vs.length,
-  vs.reduce((s, v) => s + v[2], 0) / vs.length,
-];
-const posOf = (v: Vec6): Vec3 => [round4(v[0]), round4(v[1]), round4(v[2])];
-const uOf = (v: Vec6): Vec3 => [round5(v[3]), round5(v[4]), round5(v[5])];
 
 /** 虚拟面心系数(8 节点 Serendipity 形函数在面心):-0.25×Σ角点 + 0.5×Σ棱中点。 */
 const serendipityCenter = (corners: ReadonlyArray<Vec3>, mids: ReadonlyArray<Vec3>): Vec3 => [
@@ -116,28 +108,6 @@ function collectBoundaryFaces(emap: EmapTable, first: FrameNodes): BoundaryFace[
     throw new Error("emap 未检出边界面:每个单元面都被相邻单元共享(重复单元或非流形网格)");
   }
   return boundary;
-}
-
-/** 面单位外法线与绕向翻转标志:几何法线与(角点均值 − 单元中心)反向则翻。 */
-function outwardNormalOf(
-  face: BoundaryFace,
-  cornerPos: ReadonlyArray<Vec3>,
-): { normal: Vec3; flip: boolean } {
-  const geometric = cross3(
-    sub3(cornerPos[1]!, cornerPos[0]!),
-    sub3(cornerPos[2]!, cornerPos[0]!),
-  );
-  const len = Math.hypot(geometric[0], geometric[1], geometric[2]);
-  if (len < DEGENERATE_EPS) {
-    throw new Error(
-      `emap 边界面退化(角点共线或重合,角点 ${[...face.corners].join(",")}),无法定向`,
-    );
-  }
-  const unit: Vec3 = [geometric[0] / len, geometric[1] / len, geometric[2] / len];
-  if (dot3(unit, sub3(mean3(cornerPos), face.elemCenter)) >= 0) {
-    return { normal: unit, flip: false };
-  }
-  return { normal: [-unit[0], -unit[1], -unit[2]], flip: true };
 }
 
 /** 二次面几何:角点-中点-面心 8 三角扇 + 角点→中点→角点网格线(celltris 同构)。 */
@@ -210,7 +180,11 @@ function buildShell(
 
   for (const face of boundary) {
     const cornerPos = face.corners.map((n) => posOf(first.get(n)!));
-    const { normal, flip } = outwardNormalOf(face, cornerPos);
+    const { normal, flip } = orientNormal(
+      cornerPos,
+      sub3(mean3(cornerPos), face.elemCenter),
+      `emap 边界面(角点 ${[...face.corners].join(",")})`,
+    );
     const cIdx = face.corners.map((n) => sharedVertexOf(n, normal));
     if (face.mids.length === 0) {
       faces.push(linearFaceGeom(cIdx, flip));
@@ -228,17 +202,6 @@ function buildShell(
     faces.push(quadFaceGeom(cIdx, mIdx, centerIdx, flip));
   }
   return { vertBase, vertNorm, framesU, faces };
-}
-
-/** 三轴包围盒最大边长(meta.side 口径)。 */
-function bboxMaxSide(first: FrameNodes): number {
-  let lo: Vec3 = [Infinity, Infinity, Infinity];
-  let hi: Vec3 = [-Infinity, -Infinity, -Infinity];
-  for (const v of first.values()) {
-    lo = [Math.min(lo[0], v[0]), Math.min(lo[1], v[1]), Math.min(lo[2], v[2])];
-    hi = [Math.max(hi[0], v[0]), Math.max(hi[1], v[1]), Math.max(hi[2], v[2])];
-  }
-  return round4(Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
 }
 
 /** emap 通用构网:帧节点云 + emap.csv 单元连接表 → 外壳 MeshData(mode: "emap")。 */

@@ -10,6 +10,7 @@
 export interface FaceGeom {
   tris: number[];
   wire: number[];
+  part?: number;                         // epart 部件号(仅 tet 皮肤标注;无 epart 输入则缺席)
 }
 
 export interface MeshMeta {
@@ -31,6 +32,7 @@ export interface MeshData {
   vertNorm: number[];                    // 平铺静态面法线(光照用)
   framesU: number[][];                   // 每帧平铺位移 [ux,uy,uz]×N
   faces: FaceGeom[];
+  parts?: number[];                      // 升序去重部件号(有 epart 输入时才有,tet 皮肤)
   stages: StageInfo;
   mode: "lattice" | "emap";
 }
@@ -39,6 +41,7 @@ export interface MeshData {
 export interface MeshInput {
   frames: ReadonlyArray<import("../csv").FrameNodes>;
   emap?: import("../csv").EmapTable;     // 缺席 → 尝试规则格反推
+  epart?: import("../csv").EpartTable;   // 单元号 → part 号侧车(仅 tet 皮肤消费)
   stageLabels?: string[];
   stageTimes?: number[];
   results?: Record<string, number>;

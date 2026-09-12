@@ -24,7 +24,7 @@ export {
   parseProgressCsv,
   parseResultsCsv,
 } from "./csv";
-export type { EmapTable, EpartTable, FrameNodes, StageRow, Vec6 } from "./csv";
+export type { EmapCell, EmapTable, EpartTable, FrameNodes, StageRow, Vec6 } from "./csv";
 export { segOf, depthAt, interpolateFrame } from "./playback-model";
 export { viridis, VIRIDIS_STOPS } from "./colormap";
 
