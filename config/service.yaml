@@ -5,6 +5,8 @@
 server:
   host: 0.0.0.0        # 跨机器可调用(内网免鉴权,勿暴露公网)
   port: 8010
+  cors_origins: []     # 跨域放行源(如 ["http://前端:3000"]),默认关 = 不挂 CORS;
+                       # 前端 hip-playback 回放组件跨域拉工件时开启;只放行 GET
 
 ansys:
   bin: /ansys/ansys_inc/v252/ansys/bin/ansys252   # 2025 R2(许可服务 lmgrd+ansyslmd@1055)

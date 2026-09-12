@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 DEFAULT_CONFIG_PATH = Path("config/service.yaml")
 
@@ -23,6 +23,7 @@ ENV_OVERRIDES: tuple[tuple[str, str, str], ...] = (
     ("ANSYSLMD_LICENSE_FILE", "ansys", "license_file"),
     ("HIP_SERVICE_JOBS_DIR", "storage", "jobs_dir"),
     ("HIP_SERVICE_PASSTHROUGH_ENABLED", "passthrough", "enabled"),
+    ("HIP_SERVICE_CORS_ORIGINS", "server", "cors_origins"),
 )
 
 
@@ -41,6 +42,17 @@ class ServerConfig(BaseModel):
 
     host: str = "0.0.0.0"
     port: int = Field(default=8010, ge=1, le=65535)
+    # 跨域放行源(如前端页面经 hip-playback 组件跨域拉取工件);默认空 = 不挂 CORS,
+    # 行为与历史版本一致。环境变量 HIP_SERVICE_CORS_ORIGINS 支持逗号分隔字符串。
+    cors_origins: tuple[str, ...] = ()
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _split_env_string(cls, value: object) -> object:
+        """兼容环境变量传入的逗号分隔字符串("a, b" → ("a","b"));列表/元组原样。"""
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        return value
 
 
 class AnsysConfig(BaseModel):
