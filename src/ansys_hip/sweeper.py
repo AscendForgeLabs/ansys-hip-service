@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import shutil
 import time
@@ -44,6 +45,12 @@ logger = logging.getLogger(__name__)
 
 # GiB(与 df 的 G 同口径):配置的 GB 值 → 字节
 GIB = 1024**3
+
+# 磁盘水位轮询间隔(秒;常量不进配置 — 粒度无调优需求,statvfs 级开销)
+DISK_CHECK_INTERVAL_S = 60.0
+# 紧急清理恢复目标 = min_free_gb + 此 GiB 数(滞回防抖:删到 25G 才停,
+# 避免在 20G 阈值边界每 60s 反复触发/停止)
+EMERGENCY_HEADROOM_GB = 5.0
 
 
 @dataclass(frozen=True)
@@ -196,6 +203,116 @@ def sweep_over_quota(
     return removed
 
 
+def _disk_free_bytes(path: Path) -> int:
+    """路径所在文件系统剩余字节(独立封装,测试以 monkeypatch 替换)。"""
+    return shutil.disk_usage(path).free
+
+
+def _watched_filesystems(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    """受监视路径按所在设备去重(jobs/uploads 同盘只查一次);缺失路径剔除。
+
+    只监控服务自己的数据盘:清理性动作只能释放 jobs/uploads 的数据,系统盘
+    告警属运维面(见文档)。存储根目录尚未创建时不监控(无数据无压力)。
+    """
+    seen_devices: set[int] = set()
+    watched: list[Path] = []
+    for path in paths:
+        try:
+            device = path.stat().st_dev
+        except OSError:
+            continue
+        if device not in seen_devices:
+            seen_devices.add(device)
+            watched.append(path)
+    return tuple(watched)
+
+
+def sweep_emergency(
+    jobs_root: Path,
+    uploads_root: Path,
+    target_free_bytes: int,
+    watched_paths: tuple[Path, ...],
+    active_ids: frozenset[str],
+) -> bool:
+    """水位触发的紧急清理:无视保留期按最老删(作业→上传)至受监视盘达标。
+
+    返回是否恢复到目标;候选耗尽仍低 → logger.error(每次水位检查都会重复
+    报警,事故级噪音刻意不节流),只能人工介入 — 活跃作业目录是运行现场,
+    任何盘压下都不删。
+    """
+    def recovered() -> bool:
+        return all(
+            _disk_free_bytes(path) >= target_free_bytes for path in watched_paths
+        )
+
+    if recovered():
+        return True
+    removed_jobs = 0
+    for info in scan_job_dirs(jobs_root, active_ids):  # 已按 sort_key 升序
+        if recovered():
+            break
+        shutil.rmtree(info.job_dir, ignore_errors=True)
+        removed_jobs += 1
+    removed_uploads = 0
+    if not recovered() and uploads_root.is_dir():
+        # 作业候选删尽仍低:最老上传兜底(可能删到已上传未提交的文件 —
+        # 最老排序兜底,仅极端盘压时发生,见模块 docstring 已知边界)
+        uploads = sorted(
+            (path for path in uploads_root.iterdir() if path.is_file()),
+            key=_path_mtime,
+        )
+        for upload in uploads:
+            if recovered():
+                break
+            upload.unlink(missing_ok=True)
+            removed_uploads += 1
+    if removed_jobs or removed_uploads:
+        logger.warning(
+            "紧急清理:删除终态作业 %d 个、上传 %d 个", removed_jobs, removed_uploads
+        )
+    if recovered():
+        return True
+    free_desc = ", ".join(
+        f"{path} 剩 {_disk_free_bytes(path) / GIB:.1f}G" for path in watched_paths
+    )
+    logger.error(
+        "磁盘水位紧急清理后仍低于目标(%s < %dG):已无可清理对象"
+        "(活跃作业 %d 个在跑、运行现场不删),需人工介入",
+        free_desc,
+        target_free_bytes // GIB,
+        len(active_ids),
+    )
+    return False
+
+
+def _run_watermark_check(
+    settings: Settings, active_ids: frozenset[str]
+) -> None:
+    """一轮水位检查:任一受监视盘剩余 < min_free_gb → 紧急清理(滞回目标)。"""
+    threshold_gb = settings.storage.min_free_gb
+    watched = _watched_filesystems((settings.jobs_root, settings.uploads_root))
+    if not watched:
+        return
+    if all(_disk_free_bytes(path) >= threshold_gb * GIB for path in watched):
+        return
+    free_desc = ", ".join(
+        f"{path} 剩 {_disk_free_bytes(path) / GIB:.1f}G" for path in watched
+    )
+    logger.warning(
+        "磁盘水位告警(%s 低于 %gG):触发紧急清理,目标恢复到 %gG",
+        free_desc,
+        threshold_gb,
+        threshold_gb + EMERGENCY_HEADROOM_GB,
+    )
+    sweep_emergency(
+        settings.jobs_root,
+        settings.uploads_root,
+        int((threshold_gb + EMERGENCY_HEADROOM_GB) * GIB),
+        watched,
+        active_ids,
+    )
+
+
 def run_sweep_once(settings: Settings, active_ids: frozenset[str]) -> None:
     """一轮完整清扫:按天(jobs + uploads)+ 配额;启动即刻轮与周期轮共用入口。"""
     storage = settings.storage
@@ -219,10 +336,11 @@ _TICK_FLOOR_S = 0.1
 
 
 class StorageSweeper:
-    """周期清扫后台任务(生命周期由 FastAPI lifespan 管理)。
+    """周期清扫 + 磁盘水位监控的后台任务(生命周期由 FastAPI lifespan 管理)。
 
-    - start():先执行一轮即刻清扫(= 旧启动清扫语义 + 孤儿修复),
-      再按配置起后台任务(sweep_interval_s=0 → 不建任务);
+    - start():先执行一轮即刻清扫(= 旧启动清扫语义 + 孤儿修复),再按配置
+      起后台任务(sweep_interval_s 与 min_free_gb 均为 0 → 不建任务);
+    - 单任务双时钟:周期清扫与水位检查各自计时,谁到点谁跑,取最近者休眠;
     - 每 tick 在事件循环线程现取 active_ids 快照,重活经 asyncio.to_thread
       进线程池,不阻塞事件循环;
     - 单周期故障仅记日志,任务继续(清扫是长跑保障,不能因一次 OSError 挂掉)。
@@ -235,20 +353,24 @@ class StorageSweeper:
 
     @property
     def is_running(self) -> bool:
-        """后台任务是否在跑(未配置周期 = 恒 False)。"""
+        """后台任务是否在跑(周期与水位均关闭 = 恒 False)。"""
         return self._task is not None and not self._task.done()
 
     async def start(self) -> None:
-        """启动即刻清扫一轮,再按配置起周期后台任务。"""
+        """启动即刻清扫一轮,再按配置起周期/水位后台任务。"""
         active = self._queue.active_job_ids()
         await asyncio.to_thread(run_sweep_once, self._settings, active)
         interval_s = self._settings.storage.sweep_interval_s
-        if interval_s <= 0:
-            logger.info("存储清扫:仅启动时执行一轮(sweep_interval_s=0)")
+        watch_disk = self._settings.storage.min_free_gb > 0
+        if interval_s <= 0 and not watch_disk:
+            logger.info("存储清扫:仅启动时执行一轮(sweep_interval_s=0 且 min_free_gb=0)")
             return
         self._task = asyncio.create_task(self._run(), name="hip-storage-sweeper")
         logger.info(
-            "存储清扫任务已启动(周期 %ds,作业根 %s)", interval_s, self._settings.jobs_root
+            "存储清扫任务已启动(周期清扫 %s,水位监控 %s,作业根 %s)",
+            f"{interval_s}s" if interval_s > 0 else "关",
+            f"阈值 {self._settings.storage.min_free_gb:g}G" if watch_disk else "关",
+            self._settings.jobs_root,
         )
 
     async def stop(self) -> None:
@@ -265,14 +387,23 @@ class StorageSweeper:
 
     async def _run(self) -> None:
         interval_s = float(self._settings.storage.sweep_interval_s)
-        next_sweep = time.monotonic() + interval_s
+        started = time.monotonic()
+        next_sweep = started + (interval_s if interval_s > 0 else math.inf)
+        next_disk = (
+            started + DISK_CHECK_INTERVAL_S
+            if self._settings.storage.min_free_gb > 0
+            else math.inf
+        )
         while True:
             now = time.monotonic()
-            await asyncio.sleep(max(next_sweep - now, _TICK_FLOOR_S))
+            await asyncio.sleep(max(min(next_sweep, next_disk) - now, _TICK_FLOOR_S))
             now = time.monotonic()
             try:
+                if now >= next_disk:
+                    # 先排下一轮再执行:本轮抛错也按整周期退避,不刷屏重试
+                    next_disk = now + DISK_CHECK_INTERVAL_S
+                    await self._check_disk_watermark()
                 if now >= next_sweep:
-                    # 先排下一轮再执行:本周期抛错也按整周期退避,不刷屏重试
                     next_sweep = now + interval_s
                     active = self._queue.active_job_ids()
                     await asyncio.to_thread(run_sweep_once, self._settings, active)
@@ -280,3 +411,8 @@ class StorageSweeper:
                 raise
             except Exception:  # noqa: BLE001 — 单周期故障不拖垮长跑任务
                 logger.exception("清扫周期执行异常,下一周期继续")
+
+    async def _check_disk_watermark(self) -> None:
+        """水位检查经线程执行(disk_usage + 紧急清理均为同步重活)。"""
+        active = self._queue.active_job_ids()
+        await asyncio.to_thread(_run_watermark_check, self._settings, active)

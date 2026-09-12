@@ -25,7 +25,14 @@ from ansys_hip.settings import (
     load_settings,
 )
 from ansys_hip import sweeper as sweeper_module
-from ansys_hip.sweeper import run_sweep_once, sweep_expired_jobs, sweep_expired_uploads, sweep_over_quota
+from ansys_hip.sweeper import (
+    GIB,
+    run_sweep_once,
+    sweep_emergency,
+    sweep_expired_jobs,
+    sweep_expired_uploads,
+    sweep_over_quota,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_CONFIG_PATH = REPO_ROOT / "config" / "service.yaml"
@@ -35,6 +42,13 @@ FRESH_ISO = datetime.now(timezone.utc).isoformat(timespec="seconds")
 STALE_ISO = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(
     timespec="seconds"
 )
+
+
+def _iso_days_ago(days: int) -> str:
+    """N 天前的 ISO 时间串(构造不同"最老"梯度用)。"""
+    return (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat(timespec="seconds")
 
 
 def make_job_dir(
@@ -414,3 +428,104 @@ def test_run_sweep_once_includes_quota_path(settings_factory):
     # Assert
     assert not oldest.exists()
     assert newest.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# 磁盘水位监控 + 紧急清理(无视保留期,滞回目标 = 阈值 + 5G)
+# ---------------------------------------------------------------------------
+
+def test_emergency_sweep_until_hysteresis_target(tmp_path, monkeypatch):
+    """紧急清理删到目标即停:每个目录"占 12G",删最老两个到 25G 恰好达标。"""
+    # Arrange(剩余空间 = 25G - 12G×(现存目录数-1):删一个多 12G,确定性模型)
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    oldest = make_job_dir(jobs_root, "oldTerm1", finished_at=_iso_days_ago(30))
+    middle = make_job_dir(jobs_root, "midTerm1", finished_at=_iso_days_ago(20))
+    newest = make_job_dir(jobs_root, "newTerm1", finished_at=FRESH_ISO)
+    candidates = (oldest, middle, newest)
+
+    def fake_free(path: Path) -> int:
+        existing = sum(1 for job_dir in candidates if job_dir.exists())
+        return 25 * GIB - 12 * GIB * (existing - 1)
+
+    monkeypatch.setattr(sweeper_module, "_disk_free_bytes", fake_free)
+
+    # Act(目标 25G:3 目录时 1G → 删最老 13G 仍低 → 删次老 25G 达标即停)
+    recovered = sweep_emergency(
+        jobs_root, uploads_root,
+        target_free_bytes=25 * GIB,
+        watched_paths=(tmp_path,),
+        active_ids=frozenset(),
+    )
+
+    # Assert
+    assert recovered is True
+    assert not oldest.exists()
+    assert not middle.exists()
+    assert newest.is_dir()
+
+
+def test_emergency_logs_error_and_keeps_active_when_exhausted(
+    tmp_path, monkeypatch, caplog
+):
+    # Arrange(恒低 1G:候选耗尽仍不达标 → error 报警;活跃目录绝不删)
+    monkeypatch.setattr(
+        sweeper_module, "_disk_free_bytes", lambda path: 1 * GIB
+    )
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    active = make_job_dir(jobs_root, "actJob001", status="running")
+    terminal = make_job_dir(jobs_root, "termJob01", finished_at=FRESH_ISO)
+    upload = uploads_root / "some.inp"
+    upload.write_text("x", encoding="utf-8")
+
+    # Act
+    with caplog.at_level("ERROR"):
+        recovered = sweep_emergency(
+            jobs_root, uploads_root,
+            target_free_bytes=25 * GIB,
+            watched_paths=(tmp_path,),
+            active_ids=frozenset({"actJob001"}),
+        )
+
+    # Assert
+    assert recovered is False
+    assert not terminal.exists()
+    assert not upload.exists()
+    assert active.is_dir()
+    assert any("需人工介入" in record.getMessage() for record in caplog.records)
+
+
+def test_sweeper_task_created_when_only_watermark_on(settings_factory):
+    # Arrange(周期关、水位开 → 任务仍建立:双时钟各管各的)
+    settings = with_storage(settings_factory(), sweep_interval_s=0, min_free_gb=10)
+    app = create_app(settings)
+
+    # Act / Assert(tmp 所在盘真实剩余充足 → 只验证任务建立,不触发紧急)
+    with TestClient(app):
+        assert app.state.sweeper.is_running is True
+
+
+def test_watermark_monitor_triggers_emergency(
+    settings_factory, monkeypatch, caplog
+):
+    """水位监控接线:60s 轮询(测试压到 0.05s)发现低于阈值 → 紧急清理真实执行。"""
+    # Arrange
+    monkeypatch.setattr(sweeper_module, "DISK_CHECK_INTERVAL_S", 0.05)
+    monkeypatch.setattr(
+        sweeper_module, "_disk_free_bytes", lambda path: 1 * GIB
+    )
+    settings = with_storage(settings_factory(), sweep_interval_s=0, min_free_gb=20)
+    fresh = make_job_dir(settings.jobs_root, "freshJob1", finished_at=FRESH_ISO)
+    app = create_app(settings)
+
+    # Act
+    with TestClient(app):
+        time.sleep(0.5)
+        assert app.state.sweeper.is_running is True
+
+    # Assert(新鲜终态目录被紧急清理删除;候选耗尽 → error 报警)
+    assert not fresh.exists()
+    assert any("需人工介入" in record.getMessage() for record in caplog.records)
