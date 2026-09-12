@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ from .settings import Settings
 
 logger = logging.getLogger(__name__)
 
+# GiB(与 df 的 G 同口径):配置的 GB 值 → 字节
+GIB = 1024**3
+
 
 @dataclass(frozen=True)
 class JobDirInfo:
@@ -51,12 +55,24 @@ class JobDirInfo:
     sort_key: datetime            # finished_at → created_at → 目录 mtime 逐级回退
 
 
-def _dir_mtime(path: Path) -> datetime:
-    """目录 mtime(UTC);目录竞态消失时返回 epoch(排序垫底,不抛出)。"""
+def _path_mtime(path: Path) -> datetime:
+    """路径 mtime(UTC);竞态消失时返回 epoch(排序垫底,不抛出)。"""
     try:
         return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     except OSError:
         return datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _tree_size_bytes(path: Path) -> int:
+    """目录树递归大小(字节);不存在返回 0,单文件竞态消失按 0 计。"""
+    total = 0
+    for root, _dirs, files in os.walk(path, onerror=lambda _error: None):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                continue
+    return total
 
 
 def scan_job_dirs(
@@ -76,14 +92,14 @@ def scan_job_dirs(
         payload = load_state_payload(job_dir / STATE_FILENAME)
         if payload is None:
             # 孤儿:无/坏 state.json,按目录 mtime 判龄
-            entries.append(JobDirInfo(job_dir, None, _dir_mtime(job_dir)))
+            entries.append(JobDirInfo(job_dir, None, _path_mtime(job_dir)))
             continue
         if payload.get("status") not in TERMINAL_STATUS_VALUES:
             continue
         sort_key = (
             parse_iso(payload.get("finished_at"))
             or parse_iso(payload.get("created_at"))
-            or _dir_mtime(job_dir)
+            or _path_mtime(job_dir)
         )
         entries.append(JobDirInfo(job_dir, payload.get("status"), sort_key))
     return tuple(sorted(entries, key=lambda info: info.sort_key))
@@ -136,11 +152,62 @@ def sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
     return removed
 
 
+def sweep_over_quota(
+    jobs_root: Path,
+    uploads_root: Path,
+    max_total_bytes: int,
+    active_ids: frozenset[str],
+) -> int:
+    """jobs+uploads 合计超配额 → 按最老优先删终态作业,删尽再删最老上传,至达标。
+
+    第二道保险(49G 累积事故):按天保留拦不住作业风暴或单作业超大文件,
+    总量上限直接封顶。删除顺序与紧急清理同口径(sort_key 升序 → 上传 mtime
+    升序);每删一个候选复测总量,恰好达标即停。返回删除的目录/文件数。
+    """
+    if max_total_bytes <= 0:
+        return 0
+
+    def total_bytes() -> int:
+        return _tree_size_bytes(jobs_root) + _tree_size_bytes(uploads_root)
+
+    if total_bytes() <= max_total_bytes:
+        return 0
+    removed = 0
+    for info in scan_job_dirs(jobs_root, active_ids):  # 已按 sort_key 升序
+        if total_bytes() <= max_total_bytes:
+            break
+        shutil.rmtree(info.job_dir, ignore_errors=True)
+        removed += 1
+        logger.info("配额超限:已删除最老终态作业目录 %s", info.job_dir.name)
+    if total_bytes() <= max_total_bytes or not uploads_root.is_dir():
+        return removed
+    # 作业候选删尽仍超:最老上传文件兜底(可能删到已上传未提交的文件 —
+    # 最老排序兜底,仅极端超配额时发生,见模块 docstring 已知边界)
+    uploads = sorted(
+        (path for path in uploads_root.iterdir() if path.is_file()),
+        key=_path_mtime,
+    )
+    for upload in uploads:
+        if total_bytes() <= max_total_bytes:
+            break
+        upload.unlink(missing_ok=True)
+        removed += 1
+        logger.info("配额超限:已删除最老上传 %s", upload.name)
+    return removed
+
+
 def run_sweep_once(settings: Settings, active_ids: frozenset[str]) -> None:
-    """一轮按天清扫(jobs + uploads);启动即刻轮与周期轮共用的入口。"""
-    retention_days = settings.storage.retention_days
-    sweep_expired_jobs(settings.jobs_root, retention_days, active_ids)
-    sweep_expired_uploads(settings.uploads_root, retention_days)
+    """一轮完整清扫:按天(jobs + uploads)+ 配额;启动即刻轮与周期轮共用入口。"""
+    storage = settings.storage
+    sweep_expired_jobs(settings.jobs_root, storage.retention_days, active_ids)
+    sweep_expired_uploads(settings.uploads_root, storage.retention_days)
+    if storage.max_total_gb > 0:
+        sweep_over_quota(
+            settings.jobs_root,
+            settings.uploads_root,
+            int(storage.max_total_gb * GIB),
+            active_ids,
+        )
 
 
 # ---------------------------------------------------------------------------

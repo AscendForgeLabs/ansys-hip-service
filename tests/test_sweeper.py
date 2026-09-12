@@ -25,7 +25,7 @@ from ansys_hip.settings import (
     load_settings,
 )
 from ansys_hip import sweeper as sweeper_module
-from ansys_hip.sweeper import sweep_expired_jobs, sweep_expired_uploads
+from ansys_hip.sweeper import run_sweep_once, sweep_expired_jobs, sweep_expired_uploads, sweep_over_quota
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_CONFIG_PATH = REPO_ROOT / "config" / "service.yaml"
@@ -302,3 +302,115 @@ def test_periodic_tick_survives_exception(settings_factory, monkeypatch, caplog)
     assert any(
         "清扫周期执行异常" in record.getMessage() for record in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# 配额清理(纯函数):总量超限 → 最老终态作业优先 → 上传兜底
+# ---------------------------------------------------------------------------
+
+def _fill(path: Path, size: int) -> None:
+    """写入指定字节数的占位文件(配额测试用)。"""
+    path.write_bytes(b"x" * size)
+
+
+def test_quota_deletes_oldest_terminal_first(tmp_path):
+    # Arrange(总 6000 > 配额 4000;删最老终态(3000)后达标)
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    oldest = make_job_dir(jobs_root, "oldTerm1", finished_at=STALE_ISO)
+    newest = make_job_dir(jobs_root, "newTerm1", finished_at=FRESH_ISO)
+    _fill(oldest / "big.bin", 3000)
+    _fill(newest / "big.bin", 3000)
+
+    # Act
+    removed = sweep_over_quota(
+        jobs_root, uploads_root, max_total_bytes=4000, active_ids=frozenset()
+    )
+
+    # Assert(恰好删到达标即停:只删最老)
+    assert removed == 1
+    assert not oldest.exists()
+    assert newest.is_dir()
+
+
+def test_quota_noop_when_under_limit(tmp_path):
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    stale = make_job_dir(jobs_root, "oldTerm1", finished_at=STALE_ISO)
+    _fill(stale / "big.bin", 100)
+
+    assert sweep_over_quota(jobs_root, uploads_root, 10_000, frozenset()) == 0
+    assert stale.is_dir()
+    assert sweep_over_quota(jobs_root, uploads_root, 0, frozenset()) == 0  # 0 = 关闭
+
+
+def test_quota_falls_through_to_uploads(tmp_path):
+    # Arrange(唯一作业目录 active 不可删;超配额只能删上传,按最老 mtime 序)
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    active = make_job_dir(
+        jobs_root, "actJob001", status="running", created_at=FRESH_ISO
+    )
+    _fill(active / "big.bin", 3000)
+    old_upload = uploads_root / "old.inp"
+    new_upload = uploads_root / "new.inp"
+    _fill(old_upload, 2000)
+    _fill(new_upload, 2000)
+    os.utime(old_upload, (OLD_TS, OLD_TS))
+
+    # Act(总 7000 > 配额 3000;删两个上传后 = 3000 达标,active 目录不动)
+    removed = sweep_over_quota(
+        jobs_root, uploads_root, max_total_bytes=3000, active_ids=frozenset({"actJob001"})
+    )
+
+    # Assert
+    assert removed == 2
+    assert not old_upload.exists()
+    assert not new_upload.exists()
+    assert active.is_dir()
+
+
+def test_quota_nothing_deletable_keeps_all(tmp_path):
+    # Arrange(active 目录超配额但无任何可删对象)
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    active = make_job_dir(jobs_root, "actJob001", status="running")
+    _fill(active / "big.bin", 5000)
+
+    # Act
+    removed = sweep_over_quota(
+        jobs_root, uploads_root, max_total_bytes=3000, active_ids=frozenset({"actJob001"})
+    )
+
+    # Assert
+    assert removed == 0
+    assert active.is_dir()
+
+
+def test_run_sweep_once_includes_quota_path(settings_factory):
+    """周期轮完整链路:按天不动的新鲜终态作业,因配额超限被删最老。"""
+    # Arrange(retention 默认 3 天:两作业均新鲜不超期;配额调到只容一个)
+    settings = with_storage(settings_factory(), max_total_gb=4000 / 1024**3)
+    jobs_root = settings.jobs_root
+    oldest = make_job_dir(
+        jobs_root, "oldTerm1",
+        finished_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(
+            timespec="seconds"
+        ),
+    )
+    newest = make_job_dir(
+        jobs_root, "newTerm1", finished_at=FRESH_ISO
+    )
+    _fill(oldest / "big.bin", 3000)
+    _fill(newest / "big.bin", 3000)
+
+    # Act
+    run_sweep_once(settings, frozenset())
+
+    # Assert
+    assert not oldest.exists()
+    assert newest.is_dir()
