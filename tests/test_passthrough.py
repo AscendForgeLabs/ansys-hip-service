@@ -26,7 +26,7 @@ from ansys_hip import api as api_module
 from ansys_hip import registry
 from ansys_hip.api import ApiError, _submit, create_app
 from ansys_hip.kernels.passthrough import run_passthrough
-from ansys_hip.queue import _sweep_expired_uploads
+from ansys_hip.sweeper import sweep_expired_uploads
 from ansys_hip.registry import KernelError
 from ansys_hip.results import PROGRESS_FILENAME, RESULTS_FILENAME, parse_results_csv
 from ansys_hip.runner import run_mapdl
@@ -211,10 +211,10 @@ def test_sweep_expired_uploads_removes_only_stale(tmp_path: Path) -> None:
     old_ts = (datetime.now(timezone.utc) - timedelta(days=4)).timestamp()
     os.utime(stale, (old_ts, old_ts))
 
-    assert _sweep_expired_uploads(tmp_path, retention_days=3) == 1
+    assert sweep_expired_uploads(tmp_path, retention_days=3) == 1
     assert not stale.exists()
     assert fresh.is_file()
-    assert _sweep_expired_uploads(tmp_path / "missing", retention_days=3) == 0
+    assert sweep_expired_uploads(tmp_path / "missing", retention_days=3) == 0
 
 
 # ---------------------------------------------------------------------------

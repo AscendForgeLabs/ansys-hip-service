@@ -22,7 +22,7 @@ import shutil
 import traceback
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -94,11 +94,13 @@ class JobQueue:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """恢复遗留作业、清扫超期目录,并启动 max_concurrent 个工作协程。"""
+        """恢复遗留作业并启动 max_concurrent 个工作协程。
+
+        清扫(按天/配额/水位的超期删除)归 StorageSweeper(sweeper.py),
+        启动时由其即刻轮承接旧版启动清扫语义。
+        """
         self._stopping = False
-        retention_days = self._settings.storage.retention_days
-        _recover_and_sweep_jobs(self._jobs_root, retention_days)
-        _sweep_expired_uploads(self._settings.uploads_root, retention_days)
+        _recover_jobs(self._jobs_root)
         worker_count = max(1, self._settings.queue.max_concurrent)
         self._workers = [
             asyncio.create_task(self._worker(), name=f"hip-queue-worker-{index}")
@@ -127,6 +129,18 @@ class JobQueue:
     # ------------------------------------------------------------------
     # 对外操作
     # ------------------------------------------------------------------
+
+    def active_job_ids(self) -> frozenset[str]:
+        """内存中 pending/running 的作业 ID 快照。
+
+        须在事件循环线程调用:StorageSweeper 每 tick 现取快照后再放线程执行,
+        避免跨线程遍历可变 dict。
+        """
+        return frozenset(
+            job_id
+            for job_id, record in self._jobs.items()
+            if record.status in ACTIVE_STATUSES
+        )
 
     def submit(
         self,
@@ -206,7 +220,7 @@ class JobQueue:
         state_path = job_dir / STATE_FILENAME
         if not state_path.is_file():
             return None
-        payload = _load_state_payload(state_path)
+        payload = load_state_payload(state_path)
         if payload is None:
             return None
         try:
@@ -437,18 +451,16 @@ class JobQueue:
 # 模块级纯工具
 # ---------------------------------------------------------------------------
 
-def _recover_and_sweep_jobs(jobs_root: Path, retention_days: int) -> None:
-    """单次遍历完成作业目录的启动维护(每个 state.json 只读一次):
+def _recover_jobs(jobs_root: Path) -> None:
+    """启动恢复:上次进程遗留的 pending/running 作业 → failed(INTERNAL:服务重启中断)。
 
-    上次进程遗留的 pending/running 作业 → failed(INTERNAL:服务重启中断);
-    终态且 finished_at 超过保留期 → 删除目录。
+    超期删除已归 sweeper(按天/配额/水位三路,见 sweeper.py);孤儿目录
+    (无/坏 state.json)同样由 sweeper 的 mtime 兜底处理。
     """
     if not jobs_root.is_dir():
         return
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    removed = 0
     for job_dir in sorted(path for path in jobs_root.iterdir() if path.is_dir()):
-        payload = _load_state_payload(job_dir / STATE_FILENAME)
+        payload = load_state_payload(job_dir / STATE_FILENAME)
         if payload is None:
             continue
         status = payload.get("status")
@@ -461,36 +473,9 @@ def _recover_and_sweep_jobs(jobs_root: Path, retention_days: int) -> None:
             })
             _append_log(job_dir, "服务重启,遗留作业标记为 failed")
             logger.info("遗留作业 %s 已标记为 failed(服务重启中断)", job_dir.name)
-        elif status in TERMINAL_STATUS_VALUES:
-            finished_at = _parse_iso(payload.get("finished_at"))
-            if finished_at is None or finished_at >= cutoff:
-                continue
-            shutil.rmtree(job_dir, ignore_errors=True)
-            removed += 1
-    if removed:
-        logger.info("已清扫超期作业 %d 个(保留 %d 天)", removed, retention_days)
-
-def _sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
-    """删除超过保留期的上传文件(按修改时间;启动时内存无在册作业,无引用冲突)。"""
-    if not uploads_root.is_dir():
-        return 0
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    removed = 0
-    for upload in sorted(path for path in uploads_root.iterdir() if path.is_file()):
-        try:
-            modified_at = datetime.fromtimestamp(upload.stat().st_mtime, tz=timezone.utc)
-        except OSError:
-            continue
-        if modified_at >= cutoff:
-            continue
-        upload.unlink(missing_ok=True)
-        removed += 1
-    if removed:
-        logger.info("已清扫超期上传 %d 个(保留 %d 天)", removed, retention_days)
-    return removed
 
 
-def _load_state_payload(state_path: Path) -> dict[str, Any] | None:
+def load_state_payload(state_path: Path) -> dict[str, Any] | None:
     """读 state.json;不存在/损坏/非对象一律返回 None。"""
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
@@ -528,7 +513,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _parse_iso(value: Any) -> datetime | None:
+def parse_iso(value: Any) -> datetime | None:
     """解析 ISO 时间串;无时区按 UTC 处理,非法返回 None。"""
     if not isinstance(value, str):
         return None
