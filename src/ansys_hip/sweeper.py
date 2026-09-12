@@ -13,8 +13,9 @@
 
 孤儿兜底(修复旧版「无 state.json / 终态缺 finished_at 永远跳过」盲区):
 按目录 mtime 对齐 retention_days 判删。submit 的 mkdir→内存注册→state.json
-落盘之间存在微秒级无 state.json 窗口,但该窗口目录 mtime=now,远新于天级
-cutoff,天然安全。
+落盘之间存在微秒级无 state.json 窗口 — 配额/水位路「删到达标」没有年龄
+下限,故孤儿候选设 ORPHAN_GRACE_S 宽限期:不满宽限期的新目录(mtime=now,
+即落盘窗口内)不入任何候选,使「永不删在册目录」对全部三路硬成立。
 
 本文件前半为模块级同步纯函数(文件系统副作用,可单测),供 StorageSweeper
 经 asyncio.to_thread 调用,不在事件循环线程直接执行。
@@ -51,6 +52,9 @@ DISK_CHECK_INTERVAL_S = 60.0
 # 紧急清理恢复目标 = min_free_gb + 此 GiB 数(滞回防抖:删到 25G 才停,
 # 避免在 20G 阈值边界每 60s 反复触发/停止)
 EMERGENCY_HEADROOM_GB = 5.0
+# 孤儿候选宽限期(秒):submit 的 mkdir→state.json 落盘窗口内目录必带新
+# mtime,不满宽限期不入候选(retention 路天级 cutoff 本就不受影响)
+ORPHAN_GRACE_S = 300.0
 
 
 @dataclass(frozen=True)
@@ -98,8 +102,12 @@ def scan_job_dirs(
             continue
         payload = load_state_payload(job_dir / STATE_FILENAME)
         if payload is None:
-            # 孤儿:无/坏 state.json,按目录 mtime 判龄
-            entries.append(JobDirInfo(job_dir, None, _path_mtime(job_dir)))
+            # 孤儿:无/坏 state.json,按目录 mtime 判龄;不满宽限期的新目录
+            # 可能处于 submit 落盘窗口,不入任何清理候选(含配额/水位路)
+            mtime = _path_mtime(job_dir)
+            if mtime > datetime.now(timezone.utc) - timedelta(seconds=ORPHAN_GRACE_S):
+                continue
+            entries.append(JobDirInfo(job_dir, None, mtime))
             continue
         if payload.get("status") not in TERMINAL_STATUS_VALUES:
             continue
@@ -128,7 +136,8 @@ def sweep_expired_jobs(
         if info.sort_key >= cutoff:
             continue
         shutil.rmtree(info.job_dir, ignore_errors=True)
-        removed += 1
+        if not info.job_dir.exists():  # 部分失败不计入,留待下周期重试
+            removed += 1
     if removed:
         logger.info("已清扫超期作业目录 %d 个(保留 %d 天)", removed, retention_days)
     return removed
@@ -137,9 +146,10 @@ def sweep_expired_jobs(
 def sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
     """删除超过保留期的上传文件(按修改时间);返回删除数。
 
-    自 queue.py 迁入(行为不变);周期调用时上传可能仍被排队作业引用
-    (内核运行时才复制进 job_dir),极端盘压下删到新上传属已 documented
-    的取舍 — 见模块 docstring 与 StorageSweeper 紧急清理说明。
+    自 queue.py 迁入,单文件判龄不变;执行频率从「仅启动」变为周期 —
+    上传自此有硬 TTL:上传后隔 retention_days 才提交的作业会在受理后
+    内核拷贝时失败(按天保留语义的自然结果,上游应上传后及时提交)。
+    极端盘压下紧急清理还可能删到未超期上传(见模块 docstring 已知边界)。
     """
     if not uploads_root.is_dir():
         return 0
@@ -153,7 +163,8 @@ def sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
         if modified_at >= cutoff:
             continue
         upload.unlink(missing_ok=True)
-        removed += 1
+        if not upload.exists():
+            removed += 1
     if removed:
         logger.info("已清扫超期上传 %d 个(保留 %d 天)", removed, retention_days)
     return removed
@@ -184,8 +195,9 @@ def sweep_over_quota(
         if total_bytes() <= max_total_bytes:
             break
         shutil.rmtree(info.job_dir, ignore_errors=True)
-        removed += 1
-        logger.info("配额超限:已删除最老终态作业目录 %s", info.job_dir.name)
+        if not info.job_dir.exists():  # 部分失败不计入,留待下周期重试
+            removed += 1
+            logger.info("配额超限:已删除最老终态作业目录 %s", info.job_dir.name)
     if total_bytes() <= max_total_bytes or not uploads_root.is_dir():
         return removed
     # 作业候选删尽仍超:最老上传文件兜底(可能删到已上传未提交的文件 —
@@ -198,8 +210,9 @@ def sweep_over_quota(
         if total_bytes() <= max_total_bytes:
             break
         upload.unlink(missing_ok=True)
-        removed += 1
-        logger.info("配额超限:已删除最老上传 %s", upload.name)
+        if not upload.exists():
+            removed += 1
+            logger.info("配额超限:已删除最老上传 %s", upload.name)
     return removed
 
 
@@ -252,6 +265,8 @@ def sweep_emergency(
         if recovered():
             break
         shutil.rmtree(info.job_dir, ignore_errors=True)
+        if info.job_dir.exists():  # 部分失败不计入,留待下轮水位检查重试
+            continue
         removed_jobs += 1
     removed_uploads = 0
     if not recovered() and uploads_root.is_dir():
@@ -265,7 +280,8 @@ def sweep_emergency(
             if recovered():
                 break
             upload.unlink(missing_ok=True)
-            removed_uploads += 1
+            if not upload.exists():
+                removed_uploads += 1
     if removed_jobs or removed_uploads:
         logger.warning(
             "紧急清理:删除终态作业 %d 个、上传 %d 个", removed_jobs, removed_uploads

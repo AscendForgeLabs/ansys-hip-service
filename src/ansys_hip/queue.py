@@ -8,7 +8,8 @@
 - 异常映射:KernelError→其 code/message;超时→TIMEOUT;其他 Exception→INTERNAL;
 - 取消:pending 直接置 cancelled;running 先防御性调用 ansys_hip.runner.cancel_job
   (懒加载,runner 未就绪时跳过)再放弃等待(内核线程随 MAPDL 终止自行退出);
-- 启动时:上次进程遗留的 pending/running 作业标记为 failed,并清扫超过保留期的目录。
+- 启动时:上次进程遗留的 pending/running 作业标记为 failed;清扫(按天/配额/
+  水位三路,见 sweeper.py)已迁出本模块,由 StorageSweeper 经 lifespan 挂载。
 """
 
 from __future__ import annotations

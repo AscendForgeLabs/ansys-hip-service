@@ -12,7 +12,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 DEFAULT_CONFIG_PATH = Path("config/service.yaml")
 
@@ -154,6 +161,16 @@ class Settings(BaseModel):
     access_log: AccessLogConfig = Field(default_factory=AccessLogConfig)
     service_log: ServiceLogConfig = Field(default_factory=ServiceLogConfig)
     config_path: Path = DEFAULT_CONFIG_PATH
+
+    @model_validator(mode="after")
+    def _distinct_log_files(self) -> "Settings":
+        """两个日志文件不得同路径:同一路径两个按天轮转 handler 会互相抢轮转。"""
+        if self.service_log.file == self.access_log.file:
+            raise ValueError(
+                "service_log.file 与 access_log.file 不能指向同一文件"
+                "(service_log=服务运行日志,access_log=请求访问日志,各有独立轮转)"
+            )
+        return self
 
     @property
     def jobs_root(self) -> Path:

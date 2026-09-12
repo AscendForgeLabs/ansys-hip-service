@@ -26,7 +26,7 @@ storage:
   max_total_gb: 100        # jobs+uploads 合计超 100G 按最老优先删终态作业(0 = 关闭配额)
 
 service_log:
-  file: /ansys/hip-var/logs/service.log   # uvicorn+应用运行日志(代码内接管,按天轮转保 14 天);
+  file: var/logs/service.log   # uvicorn+应用运行日志(代码内接管,按天轮转保 14 天);
                                           # 启动命令不再需要 shell 重定向
 
 methods:

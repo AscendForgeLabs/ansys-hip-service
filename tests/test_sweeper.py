@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from ansys_hip.api import create_app
 from ansys_hip.settings import (
+    AccessLogConfig,
     ServiceLogConfig,
     Settings,
     StorageConfig,
@@ -130,6 +131,15 @@ class TestServiceLogConfig:
         target = tmp_path / "logs" / "service.log"
         settings = Settings(service_log=ServiceLogConfig(file=str(target)))
         assert settings.service_log_path == target.resolve()
+
+    def test_rejects_service_log_same_file_as_access_log(self, tmp_path):
+        # 同一路径两个 TimedRotatingFileHandler 会抢轮转,启动即拦
+        target = str(tmp_path / "logs" / "same.log")
+        with pytest.raises(ValidationError, match="access_log"):
+            Settings(
+                access_log=AccessLogConfig(file=target),
+                service_log=ServiceLogConfig(file=target),
+            )
 
 
 def test_deployed_config_enables_all_three_sweep_paths():
@@ -248,6 +258,41 @@ def test_terminal_missing_finished_at_falls_back(tmp_path):
 def test_sweep_expired_jobs_missing_root_returns_zero(tmp_path):
     assert sweep_expired_jobs(tmp_path / "missing", 3, frozenset()) == 0
     assert sweep_expired_uploads(tmp_path / "missing", retention_days=3) == 0
+
+
+def test_young_orphan_grace_protects_quota_and_emergency(tmp_path, monkeypatch):
+    """孤儿宽限期:新 mtime 孤儿(可能处于 submit 落盘窗口)不入任何清理候选。
+
+    配额/水位路"删到达标"无年龄下限 — 没有宽限期时,更老候选删尽仍不达标
+    就会删到该在册新目录。钉住 M1 修复。
+    """
+    # Arrange(唯一作业目录是"无 state.json 且 mtime=now"的年轻孤儿:裸 mkdir,
+    # 模拟 submit 的 mkdir→state.json 落盘窗口)
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    young_orphan = jobs_root / "orphNew01"
+    young_orphan.mkdir(parents=True)
+    upload = uploads_root / "payload.inp"
+    upload.write_bytes(b"x" * 2000)
+
+    # Act / Assert(配额路:超限也只能删上传,年轻孤儿不入候选)
+    removed = sweep_over_quota(
+        jobs_root, uploads_root, max_total_bytes=1000, active_ids=frozenset()
+    )
+    assert young_orphan.is_dir()
+    assert not upload.exists()
+    assert removed == 1
+
+    # Act / Assert(水位路:恒低盘压 + 候选耗尽,年轻孤儿依然不删)
+    monkeypatch.setattr(sweeper_module, "_disk_free_bytes", lambda path: 0)
+    sweep_emergency(
+        jobs_root, uploads_root,
+        target_free_bytes=25 * GIB,
+        watched_paths=(tmp_path,),
+        active_ids=frozenset(),
+    )
+    assert young_orphan.is_dir()
 
 
 # ---------------------------------------------------------------------------

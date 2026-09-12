@@ -21,6 +21,12 @@ uvicorn.access 与自研访问日志(ansys_hip.access,access_log.py)完全重复
 (每请求一行)→ 静默(NullHandler + 不传播);ansys_hip.access 自带轮转
 handler 且 propagate=False,双轨互不干扰。uvicorn.error 本就无 handler、
 传播至 uvicorn → root 文件,无需处理。
+
+已知边界(部署注记):
+- 与 access_log.py 相同,TimedRotatingFileHandler 的午夜轮转**非多进程安全**
+  — 部署假设单进程单 worker;--workers>1 需每进程独立文件或外部轮转;
+- root.setLevel(INFO) 是进程级全局副作用(测试进程内同样生效)— 本服务
+  单进程独占 logger 树,属接管语义的一部分。
 """
 
 from __future__ import annotations
