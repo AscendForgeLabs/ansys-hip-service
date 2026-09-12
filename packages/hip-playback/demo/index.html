@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>hip-playback demo — 即插即用 3D 回放</title>
+<style>
+  body { margin: 0; padding: 18px; background: #14181f; color: #cfd8e3;
+    font: 14px/1.6 "Noto Sans CJK SC", "WenQuanYi Zen Hei", system-ui, sans-serif; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #7d8a99; font-size: 12px; margin-bottom: 14px; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  input, button {
+    background: #1b2330; color: #cfd8e3; border: 1px solid #2f3a49;
+    border-radius: 5px; padding: 5px 10px; font-size: 13px; }
+  input { width: 240px; }
+  button { cursor: pointer; }
+  button:hover { background: #26303f; }
+  .hint { font-size: 11px; color: #5d6a78; margin: 8px 0 12px; }
+  hip-playback { display: block; height: 72vh; min-height: 480px;
+    border: 1px solid #2a3340; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>hip-playback demo</h1>
+<div class="sub">本页即"前端接入的全部代码":一个 script 标签 + 一个 &lt;hip-playback&gt; 标签(构建产物 dist/hip-playback.js)。</div>
+
+<!-- 通道一:jobId 自动拉取 -->
+<form id="remote">
+  <input id="base-url" placeholder="base-url,如 http://127.0.0.1:8012" value="http://127.0.0.1:8012">
+  <input id="job-id" placeholder="job-id,如 20260912-xxxx">
+  <button type="submit">从服务加载</button>
+</form>
+
+<!-- 通道二:本地工件目录(frame_N.csv / 可选 progress|results|emap.csv) -->
+<form id="local">
+  <input id="files" type="file" webkitdirectory multiple>
+  <button type="submit">从本地目录加载</button>
+  <button type="button" id="example">加载真机示例(cube_dent 6 帧)</button>
+  <span class="hint" id="local-name"></span>
+</form>
+
+<div class="hint">拖动旋转 · 滚轮缩放;时间轴/播放/变形倍率/显隐在组件 HUD 内。URL 锚点 #base=&amp;job= 可预填。</div>
+
+<hip-playback id="player"></hip-playback>
+
+<script src="../dist/hip-playback.js"></script>
+<script>
+const player = document.getElementById("player");
+const baseInput = document.getElementById("base-url");
+const jobInput = document.getElementById("job-id");
+const params = new URLSearchParams(location.hash.slice(1));
+if (params.get("base")) baseInput.value = params.get("base");
+if (params.get("job")) jobInput.value = params.get("job");
+if (params.get("debug") !== null) player.setAttribute("data-debug", "");
+if (params.get("base") && params.get("job")) {
+  player.setAttribute("base-url", baseInput.value);
+  player.setAttribute("job-id", jobInput.value);
+}
+player.addEventListener("error", (e) =>
+  console.error("[demo] 回放失败:", e.error || e.detail));
+
+document.getElementById("remote").addEventListener("submit", (e) => {
+  e.preventDefault();
+  player.setAttribute("base-url", baseInput.value.replace(/\/+$/, ""));
+  player.setAttribute("job-id", jobInput.value.trim());
+});
+document.getElementById("local").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const files = [...document.getElementById("files").files].filter((f) => /\.csv$/i.test(f.name));
+  document.getElementById("local-name").textContent = `${files.length} 个 CSV`;
+  try { await player.loadData(files); } catch { /* 组件已显示错误态 */ }
+});
+
+// 真机示例(cube_dent 6 帧,本地通道;同源 fetch 后走 loadData)
+async function loadExample() {
+  const texts = {};
+  const names = [...Array(6)].map((_, i) => `frame_${i + 1}.csv`);
+  for (const name of [...names, "progress.csv", "results.csv"]) {
+    const resp = await fetch(`./data/cube-dent/${name}`);
+    if (!resp.ok) throw new Error(`示例数据缺席:${name}`);
+    texts[name] = await resp.text();
+  }
+  await player.loadData(texts);
+}
+document.getElementById("example").addEventListener("click", () =>
+  loadExample().catch((err) => console.error("[demo] 示例加载失败:", err)));
+if (!params.get("job")) loadExample().catch(() => {});   // 打开即看(无 jobId 锚点时)
+</script>
+</body>
+</html>

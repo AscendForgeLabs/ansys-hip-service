@@ -68,7 +68,9 @@ node,x_mm,y_mm,z_mm,ux_mm,uy_mm,uz_mm
 | **② 自导 emap.csv(推荐)** | 任意网格 | .inp 末尾加 6 行 APDL 把单元→节点连接写进 declared_outputs,前端零推导 | 每作业 +一份小文件 |
 | ③ 点云渲染/重建 | 不改 .inp 的兜底 | 直接渲染节点点集按 \|u\| 着色(无面但过程可读);或前端 Delaunay/泊松重建 | 最低,观感降级 |
 
-档② APDL 片段(SOLID186 角点序 1..8;线性四面体同理取全部节点):
+档② APDL 片段(SOLID186 角点序 1..8;线性四面体同理取全部节点。
+取单元节点号的**内联函数是 `NELEM(E,位置)`** —— 真机实测 `NM()` 在 *VWRITE
+表达式中报 "No dimensions set for parameter= NM" 不可用):
 
 ```apdl
 ! ---- emap.csv:单元→角点连接(列入 declared_outputs) ----
@@ -77,14 +79,16 @@ node,x_mm,y_mm,z_mm,ux_mm,uy_mm,uz_mm
 *VWRITE,'elem','n1','n2','n3','n4','n5','n6','n7','n8'
 (A5,',',A2,',',A2,',',A2,',',A2,',',A2,',',A2,',',A2,',',A2)
 *DO,E,1,NEL
-  *VWRITE,E,NM(E,1),NM(E,2),NM(E,3),NM(E,4),NM(E,5),NM(E,6),NM(E,7),NM(E,8)
-  (E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8)
+  *VWRITE,E,NELEM(E,1),NELEM(E,2),NELEM(E,3),NELEM(E,4),NELEM(E,5),NELEM(E,6),NELEM(E,7),NELEM(E,8)
+  (E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8,',',E16.8)
 *ENDDO
 *CFCLOSE
 ```
 
-(标签 ≤8 字符自查:`'elem'` `'n1'`..`'n8'` ✓。二次单元想保留曲面细节可再写
-NM(E,9..20) 棱中点列,或直接用参考实现的虚拟面心系数:-0.25×Σ角点+0.5×Σ中点。)
+(标签 ≤8 字符自查:`'elem'` `'n1'`..`'n8'` ✓。**列数上限实测 ≈10 列**:*VWRITE
+格式行超长会被截断,21 列 hex20 全节点宽表真机实测丢列/截标签,故角点 8 列
+为验证口径;二次单元棱中点(n9..n20)如需导出应改长格式(每行 elem,位置,
+节点),或省略 —— 前端对线性连接表自动用 2 三角/面渲染,观感稍平但正确。)
 
 ## §4 各技术栈生态选项
 
@@ -118,7 +122,20 @@ NM(E,9..20) 棱中点列,或直接用参考实现的虚拟面心系数:-0.25×Σ
 
 ## §5 参考实现
 
-`examples/passthrough-demo/playback/`:
+**前端即插即用件(推荐前端直接用)**:`packages/hip-playback/` — 上述配方与
+构网逻辑的 Web Component 化(three.js r128 同版,单文件 `dist/hip-playback.js`
+自包含零构建),两行接入:
+
+```html
+<script src="hip-playback.js"></script>
+<hip-playback base-url="http://hip内网:8010" job-id="…"></hip-playback>
+```
+
+构网双路径自动选择(工件含 `emap.csv` → §3 档②通用构网;否则档①规则格反推);
+本地数据走 `loadData(files)`;跨域拉取需服务端开 `server.cors_origins`(只放行 GET)。
+开发与测试见包内 README。
+
+Python 离线参考实现 `examples/passthrough-demo/playback/`:
 
 ```bash
 python build_viewer.py <工件目录>          # 含 frame_N.csv 的目录

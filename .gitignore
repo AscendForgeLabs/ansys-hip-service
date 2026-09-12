@@ -7,3 +7,8 @@ var/
 *.rst
 *.cdb
 *.msh
+
+# hip-playback(前端回放库;dist 产物入库供前端直接取用,node_modules 不入)
+packages/hip-playback/node_modules/
+packages/hip-playback/demo/data/
+/node_modules/

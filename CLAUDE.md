@@ -18,6 +18,7 @@ uv sync --extra dev                                 # 安装依赖+测试工具(
 .venv/bin/python -m pytest tests/test_passthrough.py -q                    # 单文件
 .venv/bin/python -m pytest "tests/test_passthrough.py::TestUploadsApdl" -q # 单测试
 uv run uvicorn ansys_hip.main:app --port 8010       # 启动服务;Swagger 在 /docs,运维面板在 /panel
+cd packages/hip-playback && npm test                # 前端回放库单测(vitest);npm run build 出 dist 单文件
 ```
 
 - 测试**不跑真 MAPDL**(conftest 默认 ANSYS 路径指向 `/nonexistent`,/health 为 degraded);真求解由 lead 在部署机 v252 上手工 e2e 验证。
@@ -50,6 +51,7 @@ api.py(decorator 路由,统一错误体 ErrorBody{code,message};
 - **阶段进度读时投影**:上游 .inp 约定用 `*CFOPEN` 覆盖式整文件重写 `progress.csv`(阶段标签 + 累计秒);`JobQueue.state()` 轮询时经 `results.parse_progress_csv` 投影进 `JobState.stages`(pending → None;running → 实时;终态 → 末帧)。无后台协程、无状态迁移、无竞态。
 - **作业列表与历史回退**:`GET /jobs` = `queue.list_jobs()`(内存活跃实时 + 盘上 state.json 只读 `JobSnapshot` 回退,按 created_at 倒序);`require_job` 同经 `queue.snapshot` — 服务重启后历史作业的状态/日志/结果/工件端点仍可用,DELETE 对历史终态作业为纯目录清理;`GET /jobs/{id}/log?source=job.log|job.out` 白名单选源(运行中也可读根部实时 job.out)。
 - **运维面**:`GET /panel` 自托管单页面板(`src/ansys_hip/static/`,零构建原生 JS,内网免鉴权);请求访问日志经 `access_log.py` 中间件全量记录(`TimedRotatingFileHandler` 按天轮转,默认保 14 天,落 `var/logs/access.log`),`GET /service/log` 尾读。
+- **前端回放组件**:`packages/hip-playback/` — 帧工件 → `<hip-playback>` 即插即用 3D 回放 Web Component(three r128 单文件,浏览器侧构网:emap 通用 + 规则格反推双路径);跨域拉取经 `server.cors_origins`(默认关,只放行 GET);详见 `docs/playback-handbook.md` §5 与包内 README。
 - **作业目录** `var/jobs/<id>/`:`state.json` / `resolved-params.json` / `result.json` / `job.log` / `artifacts/` / MAPDL 的 `job.out`/`launcher.log`(外部读取面:工件下载仅限 `artifacts/`;`job.log`/`job.out` 经日志端点 `?source=` 白名单可读纯文本,`launcher.log` 与其余根部簿记文件不对外;`RESERVED_JOB_DIR_NAMES` 钉测防上传文件撞名)。重启时遗留 pending/running → failed;超保留期目录自动清扫。
 - **runner.py 诊断阶梯**:许可错误(LICENSE_UNAVAILABLE)→ job.out ERROR 行/非零退出(CONVERGENCE_FAILED)→ 正常结束但异常(INTERNAL)。进程用独立进程组,取消 = killpg;`required_outputs` 缺件检查由内核按 declared_outputs 自行判定(runner 默认 None)。
 - **超时** = min(用户 `timeout_s`, 全局 `job_timeout_s`),经 `ctx.model_copy` 传内核,queue 层零特判。
