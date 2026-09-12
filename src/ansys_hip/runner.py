@@ -45,6 +45,15 @@ LICENSE_ERROR_PATTERNS: tuple[str, ...] = (
     "CHECKOUT FAILED",
 )
 
+# MAPDL 官方退出码语义(Mechanical APDL Operations Guide §4.1 Table 4.1,
+# v242/251/252 一致;0 = 正常,不出现在失败分支;未知码不附语义)
+EXIT_CODE_MEANINGS: dict[int, str] = {
+    1: "指示错误(含崩溃信号)",
+    5: "命令行参数错误",
+    7: "许可失败",
+    8: "运行结束异常",
+}
+
 # 诊断读首尾字节预算:许可错误在 job.out 头部,真 *** ERROR *** 行聚在尾部
 # (实测 NERR 失控事故:338MB 输出的错误聚集在末尾 1% 内)。超出预算只读首尾,
 # 防 NERR 失控作业的数百 MB 输出整读进内存造成 GB 级瞬时分配
@@ -158,9 +167,12 @@ def run_mapdl(
     error_lines = extract_error_lines(out_text)
     if process.returncode != 0 or error_lines:
         detail = "\n".join(error_lines) if error_lines else f"退出码 {process.returncode}"
+        meaning = EXIT_CODE_MEANINGS.get(process.returncode)
+        code_note = f",官方语义:{meaning}" if meaning else ""
         raise KernelError(
             "CONVERGENCE_FAILED",
-            f"MAPDL 求解失败(退出码 {process.returncode}),job.out 关键行:\n{detail}",
+            f"MAPDL 求解失败(退出码 {process.returncode}{code_note}),"
+            f"job.out 关键行:\n{detail}",
         )
     if required_outputs is not None:
         missing = [name for name in required_outputs if not (job_dir / name).is_file()]

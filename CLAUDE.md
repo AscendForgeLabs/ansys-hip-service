@@ -63,6 +63,7 @@ api.py(decorator 路由,统一错误体 ErrorBody{code,message};
 - **runner 的 cwd=job_dir** 是上游 .inp 相对引用(`CDREAD` 等)的依赖,写进契约即为承诺。
 - **`-j` 作业名固定 `hipjob`**(job_id 含 `-`/`_` 不适合作 MAPDL 文件名前缀)。
 - 单位制(mm/MPa/s/℃)责任归上游 .inp,服务不做任何换算。
+- **MAPDL 官方退出码表**(Operations Guide §4.1 Table 4.1):0=正常/1=指示错误(含崩溃信号)/5=命令行参数错误/7=许可失败/8=运行结束异常;失败消息经 `runner.EXIT_CODE_MEANINGS` 附官方语义。`/NERR` 的 NMABT 默认 10000(超万条错误+警告即 "terminated by this error",大模型可 `/NERR,,99999999` 抬高)。
 - **job.out 启动横幅 `Opening new LOG, ERROR, LOCK and PAGE FILES` 含 "ERROR" 字样**(指 .err 文件,每个 job.out 头部都有);错误行判定必须钉 `*** ERROR ***` 完整标记,裸子串匹配会把退出码 0 的干净作业整批判失败。
 
 ## 测试

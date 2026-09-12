@@ -160,16 +160,32 @@ def test_read_text_bounds_huge_file(tmp_path: Path) -> None:
 def test_nonzero_exit_without_error_line_raises_convergence_failed(
     job_dir: Path, tmp_path: Path
 ) -> None:
-    # Arrange — 无 ERROR 行但退出码非零
+    # Arrange — 无 ERROR 行但退出码非零(137 = 被 kill 的信号码,不在官方表内)
     bin_path = tmp_path / "ansys_crash"
     _make_fake_ansys(bin_path, 'echo "SOLUTION IS DONE" > "$out"\nexit 137')
     ctx = _make_ctx(job_dir, bin_path)
 
-    # Act / Assert
+    # Act / Assert — 未知码只报退出码,不附官方语义
     with pytest.raises(KernelError) as excinfo:
         run_mapdl(job_dir / "job.inp", job_dir, ctx, "job-crash")
     assert excinfo.value.code == "CONVERGENCE_FAILED"
     assert "137" in excinfo.value.message
+    assert "官方语义" not in excinfo.value.message
+
+
+def test_nonzero_exit_with_known_code_appends_official_meaning(
+    job_dir: Path, tmp_path: Path
+) -> None:
+    # Arrange — 退出码 1 命中官方表(Operations Guide Table 4.1:Indicated error)
+    bin_path = tmp_path / "ansys_exit1"
+    _make_fake_ansys(bin_path, 'echo "SOLUTION IS DONE" > "$out"\nexit 1')
+    ctx = _make_ctx(job_dir, bin_path)
+
+    # Act / Assert
+    with pytest.raises(KernelError) as excinfo:
+        run_mapdl(job_dir / "job.inp", job_dir, ctx, "job-exit1")
+    assert excinfo.value.code == "CONVERGENCE_FAILED"
+    assert "官方语义:指示错误" in excinfo.value.message
 
 
 def test_license_error_line_raises_license_unavailable(job_dir: Path, tmp_path: Path) -> None:
