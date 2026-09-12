@@ -118,6 +118,14 @@ describe("parseEmapCsv", () => {
     const emap = parseEmapCsv(SYNTH_EMAP);
     expect(emap.cell).toBe("hex");
     expect(emap.elemIds).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    // 首列 E16.8 形态(*VWRITE 现实输出)与节点号同经 Math.round 取整
+    const eFmt = parseEmapCsv(
+      "elem,n1,n2,n3,n4,n5,n6,n7,n8\n" +
+        "  0.30000000E+01,  0.1E+01,  0.2E+01,  0.3E+01,  0.4E+01," +
+        "  0.5E+01,  0.6E+01,  0.7E+01,  0.8E+01\n",
+    );
+    expect(eFmt.elemIds).toEqual([3]);
+    expect(eFmt.elements[0]).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 
   it("5 列 tet4:cell='tet'、hasMidnodes=false,节点取首列后 4 列", () => {

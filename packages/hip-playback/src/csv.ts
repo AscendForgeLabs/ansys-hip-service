@@ -115,6 +115,12 @@ export function parseResultsCsv(text: string): Record<string, number> {
   return values;
 }
 
+/** 表头行判定:去空白/逗号后以 elem 开头。emap/epart 共用此唯一语义(取更严者,
+ * 病态输入如 "e,lem" 两解析器同判表头,不分叉)。 */
+function isHeaderLine(line: string): boolean {
+  return line.replace(/[\s,]/g, "").startsWith("elem");
+}
+
 /** emap 合法列宽 → 形状档:9/21 = hex8/hex20,5/11 = tet4/tet10。 */
 const EMAP_WIDTH_CELL: ReadonlyMap<number, EmapCell> = new Map([
   [9, "hex"],
@@ -129,7 +135,7 @@ export function parseEmapCsv(text: string): EmapTable {
     // 无表头也容忍(直接从数据行开始),但首行必须能当数据解析
     if (lines.length === 0) throw new CsvError("emap 文件为空");
   }
-  const dataLines = lines[0]!.trimStart().startsWith("elem") ? lines.slice(1) : lines;
+  const dataLines = isHeaderLine(lines[0]!) ? lines.slice(1) : lines;
   const elements: number[][] = [];
   const elemIds: number[] = [];
   let width = 0;
@@ -175,8 +181,8 @@ export function parseEpartCsv(text: string): EpartTable {
   if (lines.length === 0) {
     throw new CsvError("epart 文件为空");
   }
-  // 首行以 elem 开头(去空白/逗号后)视为表头跳过;无表头容忍,与 emap 同策略
-  const dataLines = lines[0]!.replace(/[\s,]/g, "").startsWith("elem") ? lines.slice(1) : lines;
+  // 首行以 elem 开头视为表头跳过;无表头容忍,与 emap 同策略(共用 isHeaderLine)
+  const dataLines = isHeaderLine(lines[0]!) ? lines.slice(1) : lines;
   for (let i = 0; i < dataLines.length; i++) {
     const cols = dataLines[i]!.split(",").map((c) => Number(c));
     const isValid =
