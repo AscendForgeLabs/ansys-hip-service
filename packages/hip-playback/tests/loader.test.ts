@@ -20,6 +20,9 @@ const FIX = {
   "emap.csv": load("fixtures/synthetic/artifacts/emap.csv"),
 } as const;
 
+// epart 侧车(单元号 → part 号):内容独立于 emap,取最小两单元映射
+const EPART_CSV = "elem,part\n1,100\n2,100\n3,200\n";
+
 // 各帧节点 1 的 ux(用于钉帧序:frame_1 < frame_2 < frame_3)
 const UX_FRAME1 = -0.23165449e-4;
 const UX_FRAME2 = -0.57913624e-4;
@@ -83,6 +86,7 @@ const fixtureFiles = (): Record<string, StubResponse> => ({
   "progress.csv": textResponse(FIX["progress.csv"]),
   "results.csv": textResponse(FIX["results.csv"]),
   "emap.csv": textResponse(FIX["emap.csv"]),
+  "epart.csv": textResponse(EPART_CSV),
 });
 
 afterEach(() => {
@@ -94,7 +98,7 @@ describe("loadFromService", () => {
     const { calls } = stubServiceFetch({
       listing: jsonResponse([
         "frame_3.csv", "progress.csv", "frame_1.csv",
-        "emap.csv", "frame_2.csv", "results.csv",
+        "emap.csv", "frame_2.csv", "results.csv", "epart.csv",
       ]),
       files: fixtureFiles(),
     });
@@ -115,6 +119,8 @@ describe("loadFromService", () => {
     expect(art.results).toEqual({ dent_dep: 1, uy_min: -1, seqv_max: 123.4567 });
     expect(art.emap?.hasMidnodes).toBe(true);
     expect(art.emap?.elements).toHaveLength(8);
+    expect(art.epart?.byElem.get(2)).toBe(100);
+    expect(art.epart?.byElem.get(3)).toBe(200);
   });
 
   it("baseUrl 去尾部斜杠后拼接", async () => {
@@ -126,7 +132,7 @@ describe("loadFromService", () => {
     expect(calls[0]).toBe(LIST_URL);
   });
 
-  it("progress/results/emap 不在清单 → 字段 undefined(缺席容忍)", async () => {
+  it("progress/results/emap/epart 不在清单 → 字段 undefined(缺席容忍)", async () => {
     stubServiceFetch({
       listing: jsonResponse(["frame_1.csv", "frame_2.csv"]),
       files: {
@@ -140,6 +146,7 @@ describe("loadFromService", () => {
     expect(art.stageTimes).toBeUndefined();
     expect(art.results).toBeUndefined();
     expect(art.emap).toBeUndefined();
+    expect(art.epart).toBeUndefined();
   });
 
   it("清单响应非 ok → 抛错带状态码与 URL", async () => {
@@ -200,13 +207,24 @@ describe("loadFromTexts", () => {
     expect(art.frames[2]!.get(1)![4]).toBeCloseTo(10, 12);
   });
 
-  it("progress/results/emap 缺席 → 字段 undefined", () => {
+  it("progress/results/emap/epart 缺席 → 字段 undefined", () => {
     const art = loadFromTexts({ "frame_1.csv": frame1 });
     expect(art.frames).toHaveLength(1);
     expect(art.stageLabels).toBeUndefined();
     expect(art.stageTimes).toBeUndefined();
     expect(art.results).toBeUndefined();
     expect(art.emap).toBeUndefined();
+    expect(art.epart).toBeUndefined();
+  });
+
+  it("epart.csv 侧车解析为 byElem 映射", () => {
+    const art = loadFromTexts({
+      "frame_1.csv": frame1,
+      "epart.csv": EPART_CSV,
+    });
+    expect(art.epart?.byElem.get(1)).toBe(100);
+    expect(art.epart?.byElem.get(2)).toBe(100);
+    expect(art.epart?.byElem.get(3)).toBe(200);
   });
 
   it("progress 解析为标签数组与时间数组", () => {
@@ -246,11 +264,12 @@ describe("loadFromTexts", () => {
 });
 
 describe("loadFromFiles", () => {
-  it("按文件名筛选四类工件,File 经 text() 读取", async () => {
+  it("按文件名筛选清单内工件,File 经 text() 读取", async () => {
     const files = [
       new File([FIX["frame_2.csv"]], "frame_2.csv"),
       new File([FIX["frame_1.csv"]], "frame_1.csv"),
       new File([FIX["progress.csv"]], "progress.csv"),
+      new File([EPART_CSV], "epart.csv"),
       new File(["(无关文件,不该被读取)"], "job.out"),
     ];
     const art = await loadFromFiles(files);
@@ -260,6 +279,8 @@ describe("loadFromFiles", () => {
     expect(art.stageLabels).toEqual(["MESH", "DENT_A", "DENT_B", "DENT_C"]);
     expect(art.results).toBeUndefined();
     expect(art.emap).toBeUndefined();
+    expect(art.epart?.byElem.get(1)).toBe(100);
+    expect(art.epart?.byElem.get(3)).toBe(200);
   });
 
   it("没有帧文件 → 抛错", async () => {

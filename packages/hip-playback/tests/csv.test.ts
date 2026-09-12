@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   CsvError,
   parseEmapCsv,
+  parseEpartCsv,
   parseFrameCsv,
   parseProgressCsv,
   parseResultsCsv,
@@ -111,5 +112,100 @@ describe("parseEmapCsv", () => {
 
   it("全部行都坏 → CsvError(不静默返回空)", () => {
     expect(() => parseEmapCsv("elem,n1,n2\n垃圾,行\n")).toThrow(CsvError);
+  });
+
+  it("9 列/21 列档 cell='hex',elemIds 恒填首列单元号", () => {
+    const emap = parseEmapCsv(SYNTH_EMAP);
+    expect(emap.cell).toBe("hex");
+    expect(emap.elemIds).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("5 列 tet4:cell='tet'、hasMidnodes=false,节点取首列后 4 列", () => {
+    const emap = parseEmapCsv(
+      "elem,n1,n2,n3,n4\n" +
+        "101, 1, 2, 3, 4\n" +
+        "102, 5, 6, 7, 8\n",
+    );
+    expect(emap.cell).toBe("tet");
+    expect(emap.hasMidnodes).toBe(false);
+    expect(emap.elements).toEqual([[1, 2, 3, 4], [5, 6, 7, 8]]);
+    expect(emap.elemIds).toEqual([101, 102]);
+  });
+
+  it("13 列 tet10:cell='tet'、hasMidnodes=true,每单元 10 节点", () => {
+    const emap = parseEmapCsv(
+      "elem,n1,n2,n3,n4,n5,n6,n7,n8,n9,n10\n" +
+        "7, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10\n" +
+        "8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20\n",
+    );
+    expect(emap.cell).toBe("tet");
+    expect(emap.hasMidnodes).toBe(true);
+    expect(emap.elements).toHaveLength(2);
+    expect(emap.elements[1]).toHaveLength(10);
+    expect(emap.elemIds).toEqual([7, 8]);
+  });
+
+  it("四档混宽 9↔13 → CsvError 带两宽度与分文件提示", () => {
+    const mixed =
+      "elem,n1,n2,n3,n4,n5,n6,n7,n8\n" +
+      "1, 1, 2, 3, 4, 5, 6, 7, 8\n" +
+      "2, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20\n";
+    expect(() => parseEmapCsv(mixed)).toThrow(/列数 13 与首行 9 不一致/);
+    expect(() => parseEmapCsv(mixed)).toThrow(/混合单元类型请分文件导出/);
+  });
+
+  it("四档混宽 5↔21 同样报错(先 tet 后 hex)", () => {
+    const mixed =
+      "elem,n1,n2,n3,n4\n" +
+      "1, 1, 2, 3, 4\n" +
+      "2, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20\n";
+    expect(() => parseEmapCsv(mixed)).toThrow(/列数 21 与首行 5 不一致/);
+    expect(() => parseEmapCsv(mixed)).toThrow(/混合单元类型请分文件导出/);
+  });
+
+  it("非法宽度行(7 列)跳过 + warn,不定宽也不致命", () => {
+    const rows =
+      "elem,n1,n2,n3,n4,n5,n6,n7,n8\n" +
+      "1, 1, 2, 3, 4, 5, 6, 7, 8\n" +
+      "77, 1, 2, 3, 4, 5, 6\n" +            // 7 列:不在四档集合
+      "2, 9, 10, 11, 12, 13, 14, 15, 16\n";
+    const emap = parseEmapCsv(rows);
+    expect(emap.elements).toHaveLength(2);
+    expect(emap.elemIds).toEqual([1, 2]);
+    expect(emap.hasMidnodes).toBe(false);
+  });
+});
+
+describe("parseEpartCsv", () => {
+  it("有表头:elem,part 首行跳过,解析为单元号 → part 号", () => {
+    const t = parseEpartCsv("elem,part\n1,100\n2,100\n3,200\n");
+    expect(t.byElem.get(1)).toBe(100);
+    expect(t.byElem.get(2)).toBe(100);
+    expect(t.byElem.get(3)).toBe(200);
+    expect(t.byElem.size).toBe(3);
+  });
+
+  it("无表头容忍;值前后空白剥离", () => {
+    const t = parseEpartCsv(" 1 , 100 \n2,200\n");
+    expect(t.byElem.get(1)).toBe(100);
+    expect(t.byElem.get(2)).toBe(200);
+  });
+
+  it("坏行(非两列/非正整数/撕裂半行)跳过,好行保留", () => {
+    const t = parseEpartCsv("elem,part\n1,100\n垃圾行\n0,50\n-3,60\n4.5,70\n5,80\n");
+    expect(t.byElem.size).toBe(2);
+    expect(t.byElem.get(1)).toBe(100);
+    expect(t.byElem.get(5)).toBe(80);
+  });
+
+  it("全部坏/空 → CsvError(不静默返回空)", () => {
+    expect(() => parseEpartCsv("")).toThrow(CsvError);
+    expect(() => parseEpartCsv("elem,part\n垃圾,行\n")).toThrow(/没有可用数据行/);
+  });
+
+  it("重复单元号后写覆盖先写", () => {
+    const t = parseEpartCsv("1,100\n1,300\n");
+    expect(t.byElem.size).toBe(1);
+    expect(t.byElem.get(1)).toBe(300);
   });
 });
