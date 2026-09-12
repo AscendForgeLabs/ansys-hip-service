@@ -27,34 +27,30 @@ OUT_FILENAME = "job.out"
 RESULTS_FILENAME = "results.csv"
 PROGRESS_FILENAME = "progress.csv"
 
-# MAPDL 输出中的错误行特征(job.out 中同时用于 CONVERGENCE_FAILED 诊断)
-ERROR_LINE_KEYWORDS: tuple[str, ...] = ("ERROR", "FATAL")
-
-# MAPDL 结尾/中途的统计行前缀(如 "NUMBER OF ERROR MESSAGES ENCOUNTERED= N"),
-# 含 ERROR 关键字但不是错误,提取时排除
-STATISTICS_LINE_PREFIXES: tuple[str, ...] = ("NUMBER OF", "THE NUMBER OF")
+# MAPDL 输出中的错误行标记(job.out 中同时用于 CONVERGENCE_FAILED 诊断)。
+# 必须钉 "*** ERROR ***" / "*** FATAL ***" 完整标记而非裸 "ERROR" 子串:启动横幅
+# "Opening new LOG, ERROR, LOCK and PAGE FILES"(每个 job.out 头部都有,指 .err
+# 文件)与结尾统计行 "NUMBER OF ERROR MESSAGES ENCOUNTERED= N" 都含 "ERROR" 字样
+# 但不是错误 — 裸子串曾致退出码 0 的干净作业整批误报失败(实测 10 个真作业全中招)
+ERROR_LINE_MARKERS: tuple[str, ...] = ("*** ERROR ***", "*** FATAL ***")
 
 # 提取错误行上限(KernelError message 面向人读,过载无益)
 MAX_ERROR_LINES = 40
 
 
 def extract_error_lines(out_text: str) -> list[str]:
-    """从 job.out 文本中提取含错误特征的行(去空白、保序、限量)。
+    """从 job.out 文本中提取含 "*** ERROR ***" / "*** FATAL ***" 标记的行
+    (去空白、保序、限量)。
 
-    匹配 ANSYS 经典的 "*** ERROR ***" / "*** FATAL ***" 行(大小写敏感:真错误行
-    恒为大写关键字,小写 "error" 只出现在警告散文里,如 "could invalidate error
-    estimation.");许可类错误行通常也含 ERROR 关键字,由 runner 先行按许可特征
-    识别,本函数不区分。结尾的 "NUMBER OF ERROR/FATAL MESSAGES ENCOUNTERED= N"
-    与中途的 "The number of ERROR and WARNING messages exceeds 200."(警告超量
-    提示,真错误自身会以 *** ERROR *** 行出现)都是统计行,不是错误,排除。
+    大小写敏感:真错误行恒为大写标记,小写 "error" 只出现在警告散文里,如
+    "could invalidate error estimation."。启动横幅与统计行天然不含完整标记,
+    无需额外排除。许可类错误行由 runner 先行按许可特征识别,本函数不区分。
     """
     lines = [
         stripped
         for raw in out_text.splitlines()
         for stripped in (raw.strip(),)
-        if stripped
-        and any(keyword in stripped for keyword in ERROR_LINE_KEYWORDS)
-        and not stripped.upper().startswith(STATISTICS_LINE_PREFIXES)
+        if stripped and any(marker in stripped for marker in ERROR_LINE_MARKERS)
     ]
     return lines[:MAX_ERROR_LINES]
 

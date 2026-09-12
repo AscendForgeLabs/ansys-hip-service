@@ -45,6 +45,14 @@ LICENSE_ERROR_PATTERNS: tuple[str, ...] = (
     "CHECKOUT FAILED",
 )
 
+# 诊断读首尾字节预算:许可错误在 job.out 头部,真 *** ERROR *** 行聚在尾部
+# (实测 NERR 失控事故:338MB 输出的错误聚集在末尾 1% 内)。超出预算只读首尾,
+# 防 NERR 失控作业的数百 MB 输出整读进内存造成 GB 级瞬时分配
+DIAGNOSTIC_HEAD_BYTES = 2 * 1024 * 1024
+DIAGNOSTIC_TAIL_BYTES = 14 * 1024 * 1024
+# 中部省略标记行(不含错误标记字样,不会混入错误行提取)
+_OMITTED_MIDDLE = "\n...<job.out 中部省略,仅诊断读首尾>...\n"
+
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE: dict[str, subprocess.Popen] = {}
 _CANCELLED: set[str] = set()
@@ -202,11 +210,28 @@ def _terminate_group(process: subprocess.Popen) -> None:
 
 
 def _read_text(path: Path) -> str:
-    """读文本文件;缺失/编码异常返回空串(诊断降级而非失败)。"""
+    """读 job.out 供诊断;缺失/读失败/编码异常返回空串(诊断降级而非失败)。
+
+    超出首尾预算(DIAGNOSTIC_HEAD_BYTES + DIAGNOSTIC_TAIL_BYTES)的大文件只读
+    头部与尾部,中部以省略标记行分隔;许可匹配与错误行提取共用这份有界文本。
+    """
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            if size <= DIAGNOSTIC_HEAD_BYTES + DIAGNOSTIC_TAIL_BYTES:
+                handle.seek(0)
+                return handle.read().decode("utf-8", errors="replace")
+            handle.seek(0)
+            head = handle.read(DIAGNOSTIC_HEAD_BYTES)
+            handle.seek(-DIAGNOSTIC_TAIL_BYTES, os.SEEK_END)
+            tail = handle.read(DIAGNOSTIC_TAIL_BYTES)
     except OSError:
         return ""
+    return (
+        head.decode("utf-8", errors="replace")
+        + _OMITTED_MIDDLE
+        + tail.decode("utf-8", errors="replace")
+    )
 
 
 def _match_license_error(out_text: str) -> str | None:

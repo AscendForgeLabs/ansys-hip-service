@@ -15,7 +15,14 @@ import pytest
 
 from ansys_hip.registry import KernelError
 from ansys_hip.results import extract_error_lines
-from ansys_hip.runner import cancel_job, interactive_available, run_mapdl
+from ansys_hip.runner import (
+    DIAGNOSTIC_HEAD_BYTES,
+    DIAGNOSTIC_TAIL_BYTES,
+    _read_text,
+    cancel_job,
+    interactive_available,
+    run_mapdl,
+)
 from ansys_hip.schemas import RunContext
 
 # 等 cancel_job 生效的最大轮次(每轮 50ms,共 10s,留足进程组就位余量)
@@ -94,6 +101,60 @@ def test_error_line_in_out_raises_convergence_failed(job_dir: Path, tmp_path: Pa
         run_mapdl(job_dir / "job.inp", job_dir, ctx, "job-err")
     assert excinfo.value.code == "CONVERGENCE_FAILED"
     assert "ELEMENT 5" in excinfo.value.message
+
+
+def test_banner_only_out_with_exit_zero_succeeds(job_dir: Path, tmp_path: Path) -> None:
+    # Arrange — job.out 为 v252 干净运行的完整形态:启动横幅 + 结尾零错误统计,退出码 0
+    # (回归钉:横幅曾以裸 "ERROR" 子串被误判,导致退出码 0 的干净作业整批误报)
+    bin_path = tmp_path / "ansys_banner"
+    _make_fake_ansys(
+        bin_path,
+        'echo "     Opening new LOG, ERROR, LOCK and PAGE FILES" > "$out"\n'
+        'echo "NUMBER OF ERROR   MESSAGES ENCOUNTERED=          0" >> "$out"',
+    )
+    ctx = _make_ctx(job_dir, bin_path)
+
+    # Act
+    result = run_mapdl(job_dir / "job.inp", job_dir, ctx, "job-banner")
+
+    # Assert — 横幅含 "ERROR" 字样但非错误行:退出码 0 且无真错误标记 → 成功
+    assert result["returncode"] == 0
+
+
+def test_huge_out_tail_error_still_diagnosed(job_dir: Path, tmp_path: Path) -> None:
+    # Arrange — 输出超过诊断读首尾预算(2MB+14MB)且真错误行只在最尾部:
+    # 有界读必须覆盖尾部(NERR 失控事故现场真错误聚集在末尾 1% 内)
+    bin_path = tmp_path / "ansys_big"
+    _make_fake_ansys(
+        bin_path,
+        'yes "WARNING filler line for huge output" | head -c 18000000 > "$out"\n'
+        'echo "*** ERROR *** CP = 9 TIME = 1 TAIL-MARKER-5221" >> "$out"',
+    )
+    ctx = _make_ctx(job_dir, bin_path)
+
+    # Act / Assert
+    with pytest.raises(KernelError) as excinfo:
+        run_mapdl(job_dir / "job.inp", job_dir, ctx, "job-big")
+    assert excinfo.value.code == "CONVERGENCE_FAILED"
+    assert "TAIL-MARKER-5221" in excinfo.value.message
+
+
+def test_read_text_bounds_huge_file(tmp_path: Path) -> None:
+    # 338MB 事故现场的内存护栏:超预算文件只取首尾(含省略标记行),中部不进内存
+    out_path = tmp_path / "job.out"
+    filler = "0123456789abcdef" * 64 + "\n"  # 1KB/行
+    with out_path.open("w") as handle:
+        handle.write("HEAD-MARKER-9021\n")
+        for _ in range(17 * 1024):  # ~17MB,超过 16MB 首尾预算
+            handle.write(filler)
+        handle.write("TAIL-MARKER-5221\n")
+
+    text = _read_text(out_path)
+
+    budget = DIAGNOSTIC_HEAD_BYTES + DIAGNOSTIC_TAIL_BYTES
+    assert len(text) <= budget + 200  # 首尾 + 省略标记行
+    assert "HEAD-MARKER-9021" in text
+    assert "TAIL-MARKER-5221" in text
 
 
 def test_nonzero_exit_without_error_line_raises_convergence_failed(
@@ -213,17 +274,31 @@ def test_interactive_available_returns_bool() -> None:
 
 def test_extract_error_lines() -> None:
     out = "\n".join([
+        "     Opening new LOG, ERROR, LOCK and PAGE FILES",  # 启动横幅(指 .err 文件),非错误
         "   *** ERROR ***  CP = 1.2",
         "normal line",
         "*** FATAL *** terminated",
         " This could invalidate error estimation.",  # 警告散文中的小写 error,不是错误行
-        "NUMBER OF ERROR MESSAGES ENCOUNTERED= 0",  # 结尾统计行,排除
-        "The number of ERROR and WARNING messages exceeds 200.",  # 警告超量提示,排除
+        "NUMBER OF ERROR MESSAGES ENCOUNTERED= 0",  # 结尾统计行,不含错误标记
+        "The number of ERROR and WARNING messages exceeds 200.",  # 警告超量提示,不含错误标记
     ])
     lines = extract_error_lines(out)
     assert len(lines) == 2
     assert lines[0].startswith("*** ERROR ***")
     assert lines[1].startswith("*** FATAL ***")
+
+
+def test_extract_error_lines_ignores_startup_banner() -> None:
+    # 回归钉:启动横幅含 "ERROR" 字样(每个 job.out 头部都有),曾以裸子串匹配
+    # 被误判为错误行,导致退出码 0 的干净作业整批误报 CONVERGENCE_FAILED
+    out = "\n".join([
+        "     Opening new LOG, ERROR, LOCK and PAGE FILES",
+        "NUMBER OF ERROR   MESSAGES ENCOUNTERED=          0",
+        "The number of ERROR and WARNING messages exceeds 10000.",
+        "  Use the /NERR command to increase the numberof messages.",
+        " The ANSYS run is terminated by this error.",
+    ])
+    assert extract_error_lines(out) == []
 
 
 def test_extract_error_lines_capped() -> None:
