@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -615,3 +616,201 @@ def test_service_sweep_log_endpoint(settings_factory):
         tail = client.get("/service/sweep-log?tail=1")
         assert tail.status_code == 200
         assert len(tail.text.strip().splitlines()) == 1
+
+
+# ---------------------------------------------------------------------------
+# 清理日志可观测性:时间戳 / 逐项删除行(哪个/原因/状态/大小)/ 汇总含释放与盘剩
+# ---------------------------------------------------------------------------
+
+def test_fmt_size_units():
+    """_fmt_size 自适应单位:字节级对象不至于全打成 0.0G(3KB 文件 → 2.9K)。"""
+    # Arrange / Act / Assert
+    assert sweeper_module._fmt_size(0) == "0B"
+    assert sweeper_module._fmt_size(512) == "512B"
+    assert sweeper_module._fmt_size(3000) == "2.9K"
+    assert sweeper_module._fmt_size(GIB) == "1.0G"
+
+
+def test_sweep_log_lines_have_timestamp_and_level(settings_factory):
+    """sweep.log 每行带时间戳与级别(此前裸 %(message)s,连"何时"都看不出)。"""
+    # Arrange
+    settings = settings_factory()
+    make_job_dir(settings.jobs_root, "staleJob01", finished_at=STALE_ISO)
+    create_app(settings)
+
+    # Act
+    run_sweep_once(settings, frozenset())
+
+    # Assert(时间戳 + 级别列,格式对齐 service.log 的运维可读性)
+    lines = settings.sweep_log_path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines
+    pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} (INFO|WARNING|ERROR)\s")
+    for line in lines:
+        assert pattern.match(line), line
+
+
+def _sweeper_messages(caplog) -> list[str]:
+    """caplog 里 ansys_hip.sweeper 的已渲染消息列表(逐项行断言共用)。"""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "ansys_hip.sweeper"
+    ]
+
+
+def test_retention_job_lines_name_reason_status_size(tmp_path, caplog):
+    """保留期逐项删除行:目录名 + 终态/孤儿画像 + 大小;汇总含释放量与磁盘剩余。"""
+    # Arrange(超期终态(带 3KB 载荷)+ 超期孤儿各一;孤儿须裸 mkdir —
+    # make_job_dir 总写默认 state.json,造出来的是"终态缺 finished_at"而非孤儿)
+    jobs_root = tmp_path / "jobs"
+    stale = make_job_dir(jobs_root, "staleJob01", finished_at=STALE_ISO)
+    _fill(stale / "big.bin", 3000)
+    orphan = jobs_root / "orphOld01"
+    orphan.mkdir()
+    os.utime(orphan, (OLD_TS, OLD_TS))
+
+    # Act
+    with caplog.at_level(logging.INFO, logger="ansys_hip.sweeper"):
+        removed = sweep_expired_jobs(jobs_root, retention_days=3, active_ids=frozenset())
+
+    # Assert(哪个/为何/删了什么三问逐行可答;汇总补释放量与盘剩)
+    assert removed == 2
+    messages = _sweeper_messages(caplog)
+    assert any(
+        message.startswith("删除[保留期] 作业目录 staleJob01(终态succeeded,")
+        for message in messages
+    )
+    assert any(
+        message.startswith("删除[保留期] 作业目录 orphOld01(孤儿,")
+        for message in messages
+    )
+    summary = next(m for m in messages if m.startswith("已清扫超期作业目录"))
+    assert "共释放" in summary
+    assert "磁盘剩余" in summary
+
+
+def test_retention_upload_lines_and_summary(tmp_path, caplog):
+    """保留期上传逐项删除行 + 汇总含释放量与磁盘剩余。"""
+    # Arrange
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    old = uploads_root / "old.inp"
+    _fill(old, 2000)
+    os.utime(old, (OLD_TS, OLD_TS))
+
+    # Act
+    with caplog.at_level(logging.INFO, logger="ansys_hip.sweeper"):
+        removed = sweep_expired_uploads(uploads_root, retention_days=3)
+
+    # Assert
+    assert removed == 1
+    messages = _sweeper_messages(caplog)
+    assert any(m.startswith("删除[保留期] 上传 old.inp(") for m in messages)
+    summary = next(m for m in messages if m.startswith("已清扫超期上传"))
+    assert "共释放" in summary
+    assert "磁盘剩余" in summary
+
+
+def test_quota_lines_item_and_summary(tmp_path, caplog):
+    """配额逐项行(统一「删除[配额]」句式)+ 收尾汇总;盘剩为真实 statvfs 不钉值。"""
+    # Arrange(总 6000 > 配额 4000;删最老终态 3000 后达标)
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    oldest = make_job_dir(jobs_root, "oldTerm1", finished_at=STALE_ISO)
+    newest = make_job_dir(jobs_root, "newTerm1", finished_at=FRESH_ISO)
+    _fill(oldest / "big.bin", 3000)
+    _fill(newest / "big.bin", 3000)
+
+    # Act
+    with caplog.at_level(logging.INFO, logger="ansys_hip.sweeper"):
+        removed = sweep_over_quota(
+            jobs_root, uploads_root, max_total_bytes=4000, active_ids=frozenset()
+        )
+
+    # Assert
+    assert removed == 1
+    messages = _sweeper_messages(caplog)
+    assert any(
+        m.startswith("删除[配额] 作业目录 oldTerm1(终态succeeded,") for m in messages
+    )
+    summary = next(m for m in messages if m.startswith("配额清理:"))
+    assert "上限" in summary
+    assert "磁盘剩余" in summary
+
+
+def test_quota_exhausted_warns_still_over(tmp_path, caplog):
+    """配额候选耗尽仍超限不再静默:WARNING 提示需调大配额或人工清理。"""
+    # Arrange(唯一目录 active 运行现场不可删,总量恒超 5000 > 3000)
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    active = make_job_dir(jobs_root, "actJob001", status="running")
+    _fill(active / "big.bin", 5000)
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="ansys_hip.sweeper"):
+        removed = sweep_over_quota(
+            jobs_root, uploads_root, max_total_bytes=3000, active_ids=frozenset({"actJob001"})
+        )
+
+    # Assert(删 0 个也报:违例持续期间每个周期都可见)
+    assert removed == 0
+    assert any(
+        record.levelno == logging.WARNING and "可删对象已耗尽" in record.getMessage()
+        for record in caplog.records
+        if record.name == "ansys_hip.sweeper"
+    )
+
+
+def test_emergency_lines_item_and_post_free(tmp_path, monkeypatch, caplog):
+    """水位紧急清理:逐项行(WARNING)+ 聚合含共释放与删后剩余(fake_free 确定性)。"""
+    # Arrange(剩余 = 25G − 12G×现存数:删一个多 12G)
+    jobs_root = tmp_path / "jobs"
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir()
+    oldest = make_job_dir(jobs_root, "oldTerm1", finished_at=_iso_days_ago(30))
+    newest = make_job_dir(jobs_root, "newTerm1", finished_at=FRESH_ISO)
+    candidates = (oldest, newest)
+
+    def fake_free(path: Path) -> int:
+        existing = sum(1 for job_dir in candidates if job_dir.exists())
+        return 25 * GIB - 12 * GIB * (existing - 1)
+
+    monkeypatch.setattr(sweeper_module, "_disk_free_bytes", fake_free)
+
+    # Act(目标 25G:2 目录时 13G → 删最老后 25G 达标)
+    with caplog.at_level(logging.WARNING, logger="ansys_hip.sweeper"):
+        recovered = sweep_emergency(
+            jobs_root, uploads_root,
+            target_free_bytes=25 * GIB,
+            watched_paths=(tmp_path,),
+            active_ids=frozenset(),
+        )
+
+    # Assert
+    assert recovered is True
+    messages = _sweeper_messages(caplog)
+    assert any(
+        m.startswith("删除[水位] 作业目录 oldTerm1(终态succeeded,") for m in messages
+    )
+    summary = next(m for m in messages if m.startswith("紧急清理:"))
+    assert "共释放" in summary
+    assert "剩 25.0G" in summary  # 删后真实剩余(fake_free 确定性)
+
+
+def test_startup_banner_is_config_broadcast(settings_factory, caplog):
+    """启动横幅是配置播报而非删除事件:明示"不代表删除"并带上保留/配额策略。"""
+    # Arrange / Act(进 lifespan 触发 start() 横幅)
+    settings = settings_factory()
+    with caplog.at_level(logging.INFO, logger="ansys_hip.sweeper"):
+        with TestClient(create_app(settings)):
+            pass
+
+    # Assert(横幅自带行格式说明,消除"任务已启动=删了东西"的误读)
+    banner = next(
+        m for m in _sweeper_messages(caplog) if "存储清扫服务已上线" in m
+    )
+    assert "不代表删除" in banner
+    assert "按天保留" in banner
+    assert "配额上限" in banner

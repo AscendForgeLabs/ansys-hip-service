@@ -254,8 +254,9 @@ def _health_router(settings: Settings, queue: JobQueue) -> APIRouter:
     )
     def get_service_sweep_log(tail: int | None = _tail_query()) -> PlainTextResponse:
         """存储清理事件日志(service_log 同目录 sweep.log,按天午夜轮转保留
-        14 天:清扫/配额/水位告警/紧急清理/需人工介入)尾部 N 行;缺省全文
-        (超 2MB 自动截尾 2000 行,带 X-Log-Truncated 头)。"""
+        14 天):启动配置播报、逐项删除「删除[保留期|配额|水位] 对象(状态,
+        大小)」、清扫汇总(释放量/磁盘剩余)、水位告警、紧急清理、需人工介入。
+        尾部 N 行;缺省全文(超 2MB 自动截尾 2000 行,带 X-Log-Truncated 头)。"""
         return _log_response(settings.sweep_log_path, tail)
 
     @router.get("/", include_in_schema=False)

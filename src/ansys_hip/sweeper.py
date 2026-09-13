@@ -57,6 +57,11 @@ EMERGENCY_HEADROOM_GB = 5.0
 # mtime,不满宽限期不入候选(retention 路天级 cutoff 本就不受影响)
 ORPHAN_GRACE_S = 300.0
 
+# 清理原因标签(逐项删除行「删除[原因]」与汇总行共用;grep「删除[」收齐全部删除)
+REASON_RETENTION = "保留期"
+REASON_QUOTA = "配额"
+REASON_WATERMARK = "水位"
+
 
 @dataclass(frozen=True)
 class JobDirInfo:
@@ -85,6 +90,52 @@ def _tree_size_bytes(path: Path) -> int:
             except OSError:
                 continue
     return total
+
+
+def _fmt_size(size_bytes: int) -> str:
+    """字节数 → 人类可读自适应单位(B/K/M/G/T;删除行与汇总行共用)。"""
+    if size_bytes >= 1024**4:
+        return f"{size_bytes / 1024**4:.1f}T"
+    if size_bytes >= GIB:
+        return f"{size_bytes / GIB:.1f}G"
+    if size_bytes >= 1024**2:
+        return f"{size_bytes / 1024**2:.1f}M"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f}K"
+    return f"{size_bytes}B"
+
+
+def _path_size(path: Path) -> int:
+    """文件或目录的大小(字节);竞态消失返回 0,不抛出。
+
+    不能用 _tree_size_bytes 打文件 — os.walk 对文件路径返回空恒 0。
+    """
+    try:
+        if path.is_dir():
+            return _tree_size_bytes(path)
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _log_removed_job(reason: str, info: JobDirInfo, size_bytes: int) -> None:
+    """逐作业目录删除行:哪个(名)/为何(reason)/删了什么(终态画像|孤儿 + 大小)。"""
+    portrait = "孤儿" if info.status is None else f"终态{info.status}"
+    level = logging.WARNING if reason == REASON_WATERMARK else logging.INFO
+    logger.log(
+        level,
+        "删除[%s] 作业目录 %s(%s,%s)",
+        reason,
+        info.job_dir.name,
+        portrait,
+        _fmt_size(size_bytes),
+    )
+
+
+def _log_removed_upload(reason: str, name: str, size_bytes: int) -> None:
+    """逐上传删除行(上传无终态画像,仅大小)。"""
+    level = logging.WARNING if reason == REASON_WATERMARK else logging.INFO
+    logger.log(level, "删除[%s] 上传 %s(%s)", reason, name, _fmt_size(size_bytes))
 
 
 def scan_job_dirs(
@@ -133,14 +184,24 @@ def sweep_expired_jobs(
         return 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     removed = 0
+    freed_bytes = 0
     for info in scan_job_dirs(jobs_root, active_ids):
         if info.sort_key >= cutoff:
             continue
+        size_bytes = _path_size(info.job_dir)
         shutil.rmtree(info.job_dir, ignore_errors=True)
         if not info.job_dir.exists():  # 部分失败不计入,留待下周期重试
             removed += 1
+            freed_bytes += size_bytes
+            _log_removed_job(REASON_RETENTION, info, size_bytes)
     if removed:
-        logger.info("已清扫超期作业目录 %d 个(保留 %d 天)", removed, retention_days)
+        logger.info(
+            "已清扫超期作业目录 %d 个(保留 %d 天,共释放 %s,磁盘剩余 %s)",
+            removed,
+            retention_days,
+            _fmt_size(freed_bytes),
+            _free_g(jobs_root),
+        )
     return removed
 
 
@@ -156,18 +217,28 @@ def sweep_expired_uploads(uploads_root: Path, retention_days: int) -> int:
         return 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     removed = 0
+    freed_bytes = 0
     for upload in sorted(path for path in uploads_root.iterdir() if path.is_file()):
         try:
-            modified_at = datetime.fromtimestamp(upload.stat().st_mtime, tz=timezone.utc)
+            stat = upload.stat()
         except OSError:
             continue
+        modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
         if modified_at >= cutoff:
             continue
         upload.unlink(missing_ok=True)
         if not upload.exists():
             removed += 1
+            freed_bytes += stat.st_size
+            _log_removed_upload(REASON_RETENTION, upload.name, stat.st_size)
     if removed:
-        logger.info("已清扫超期上传 %d 个(保留 %d 天)", removed, retention_days)
+        logger.info(
+            "已清扫超期上传 %d 个(保留 %d 天,共释放 %s,磁盘剩余 %s)",
+            removed,
+            retention_days,
+            _fmt_size(freed_bytes),
+            _free_g(uploads_root),
+        )
     return removed
 
 
@@ -191,35 +262,69 @@ def sweep_over_quota(
 
     if total_bytes() <= max_total_bytes:
         return 0
-    removed = 0
+    removed_jobs = 0
+    removed_uploads = 0
+    freed_bytes = 0
     for info in scan_job_dirs(jobs_root, active_ids):  # 已按 sort_key 升序
         if total_bytes() <= max_total_bytes:
             break
+        size_bytes = _path_size(info.job_dir)
         shutil.rmtree(info.job_dir, ignore_errors=True)
         if not info.job_dir.exists():  # 部分失败不计入,留待下周期重试
-            removed += 1
-            logger.info("配额超限:已删除最老终态作业目录 %s", info.job_dir.name)
-    if total_bytes() <= max_total_bytes or not uploads_root.is_dir():
-        return removed
-    # 作业候选删尽仍超:最老上传文件兜底(可能删到已上传未提交的文件 —
-    # 最老排序兜底,仅极端超配额时发生,见模块 docstring 已知边界)
-    uploads = sorted(
-        (path for path in uploads_root.iterdir() if path.is_file()),
-        key=_path_mtime,
-    )
-    for upload in uploads:
-        if total_bytes() <= max_total_bytes:
-            break
-        upload.unlink(missing_ok=True)
-        if not upload.exists():
-            removed += 1
-            logger.info("配额超限:已删除最老上传 %s", upload.name)
+            removed_jobs += 1
+            freed_bytes += size_bytes
+            _log_removed_job(REASON_QUOTA, info, size_bytes)
+    if total_bytes() > max_total_bytes and uploads_root.is_dir():
+        # 作业候选删尽仍超:最老上传文件兜底(可能删到已上传未提交的文件 —
+        # 最老排序兜底,仅极端超配额时发生,见模块 docstring 已知边界)
+        uploads = sorted(
+            (path for path in uploads_root.iterdir() if path.is_file()),
+            key=_path_mtime,
+        )
+        for upload in uploads:
+            if total_bytes() <= max_total_bytes:
+                break
+            size_bytes = _path_size(upload)
+            upload.unlink(missing_ok=True)
+            if not upload.exists():
+                removed_uploads += 1
+                freed_bytes += size_bytes
+                _log_removed_upload(REASON_QUOTA, upload.name, size_bytes)
+    removed = removed_jobs + removed_uploads
+    if removed:
+        logger.info(
+            "配额清理:删除作业目录 %d 个、上传 %d 个(上限 %s,现总量 %s,磁盘剩余 %s)",
+            removed_jobs,
+            removed_uploads,
+            _fmt_size(max_total_bytes),
+            _fmt_size(total_bytes()),
+            _free_g(jobs_root),
+        )
+    if total_bytes() > max_total_bytes:
+        # 可删对象耗尽仍超限:不静默(否则违例持续期间运维毫无感知),
+        # 与水位路「候选耗尽需人工介入」同语义,每周期重复报警不节流
+        logger.warning(
+            "配额超限:可删对象已耗尽仍超限(上限 %s,现总量 %s;"
+            "活跃作业现场不删),需调大配额或人工清理",
+            _fmt_size(max_total_bytes),
+            _fmt_size(total_bytes()),
+        )
     return removed
 
 
 def _disk_free_bytes(path: Path) -> int:
     """路径所在文件系统剩余字节(独立封装,测试以 monkeypatch 替换)。"""
     return shutil.disk_usage(path).free
+
+
+def _free_g(path: Path) -> str:
+    """单路径磁盘剩余(固定 G 口径;保留期/配额汇总行的「磁盘剩余」字段)。"""
+    return f"{_disk_free_bytes(path) / GIB:.1f}G"
+
+
+def _free_desc(paths: tuple[Path, ...]) -> str:
+    """受监视盘剩余描述(水位触发行/紧急汇总/耗尽告警共用,逐盘列出)。"""
+    return ", ".join(f"{path} 剩 {_disk_free_bytes(path) / GIB:.1f}G" for path in paths)
 
 
 def configure_sweep_logging(settings: Settings) -> None:
@@ -242,6 +347,9 @@ def configure_sweep_logging(settings: Settings) -> None:
         encoding="utf-8",
     )
     handler.name = "hip-sweep-file"
+    # 时间戳 + 级别:清扫事件没有时间戳就答不了"何时"(对齐 service.log 口径,
+    # 单 logger 聚焦视图故省 %(name)s)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
     logger.addHandler(handler)
 
 
@@ -285,14 +393,18 @@ def sweep_emergency(
     if recovered():
         return True
     removed_jobs = 0
+    removed_uploads = 0
+    freed_bytes = 0
     for info in scan_job_dirs(jobs_root, active_ids):  # 已按 sort_key 升序
         if recovered():
             break
+        size_bytes = _path_size(info.job_dir)
         shutil.rmtree(info.job_dir, ignore_errors=True)
         if info.job_dir.exists():  # 部分失败不计入,留待下轮水位检查重试
             continue
         removed_jobs += 1
-    removed_uploads = 0
+        freed_bytes += size_bytes
+        _log_removed_job(REASON_WATERMARK, info, size_bytes)
     if not recovered() and uploads_root.is_dir():
         # 作业候选删尽仍低:最老上传兜底(可能删到已上传未提交的文件 —
         # 最老排序兜底,仅极端盘压时发生,见模块 docstring 已知边界)
@@ -303,22 +415,27 @@ def sweep_emergency(
         for upload in uploads:
             if recovered():
                 break
+            size_bytes = _path_size(upload)
             upload.unlink(missing_ok=True)
             if not upload.exists():
                 removed_uploads += 1
+                freed_bytes += size_bytes
+                _log_removed_upload(REASON_WATERMARK, upload.name, size_bytes)
     if removed_jobs or removed_uploads:
+        # 删后现值(与水位触发行的删前值互补,水位全程可追)
         logger.warning(
-            "紧急清理:删除终态作业 %d 个、上传 %d 个", removed_jobs, removed_uploads
+            "紧急清理:删除作业目录 %d 个、上传 %d 个(共释放 %s,现剩 %s)",
+            removed_jobs,
+            removed_uploads,
+            _fmt_size(freed_bytes),
+            _free_desc(watched_paths),
         )
     if recovered():
         return True
-    free_desc = ", ".join(
-        f"{path} 剩 {_disk_free_bytes(path) / GIB:.1f}G" for path in watched_paths
-    )
     logger.error(
         "磁盘水位紧急清理后仍低于目标(%s < %dG):已无可清理对象"
         "(活跃作业 %d 个在跑、运行现场不删),需人工介入",
-        free_desc,
+        _free_desc(watched_paths),
         target_free_bytes // GIB,
         len(active_ids),
     )
@@ -335,12 +452,9 @@ def _run_watermark_check(
         return
     if all(_disk_free_bytes(path) >= threshold_gb * GIB for path in watched):
         return
-    free_desc = ", ".join(
-        f"{path} 剩 {_disk_free_bytes(path) / GIB:.1f}G" for path in watched
-    )
     logger.warning(
         "磁盘水位告警(%s 低于 %gG):触发紧急清理,目标恢复到 %gG",
-        free_desc,
+        _free_desc(watched),
         threshold_gb,
         threshold_gb + EMERGENCY_HEADROOM_GB,
     )
@@ -397,21 +511,30 @@ class StorageSweeper:
         return self._task is not None and not self._task.done()
 
     async def start(self) -> None:
-        """启动即刻清扫一轮,再按配置起周期/水位后台任务。"""
-        active = self._queue.active_job_ids()
-        await asyncio.to_thread(run_sweep_once, self._settings, active)
-        interval_s = self._settings.storage.sweep_interval_s
-        watch_disk = self._settings.storage.min_free_gb > 0
-        if interval_s <= 0 and not watch_disk:
-            logger.info("存储清扫:仅启动时执行一轮(sweep_interval_s=0 且 min_free_gb=0)")
-            return
-        self._task = asyncio.create_task(self._run(), name="hip-storage-sweeper")
+        """先播报配置(横幅不代表删除),再即刻清扫一轮,最后起后台任务。
+
+        横幅前置:首轮删除行紧随横幅之下,运维读日志先见配置再见动作。
+        """
+        storage = self._settings.storage
+        interval_s = storage.sweep_interval_s
+        watch_disk = storage.min_free_gb > 0
+        no_task = interval_s <= 0 and not watch_disk
         logger.info(
-            "存储清扫任务已启动(周期清扫 %s,水位监控 %s,作业根 %s)",
+            "存储清扫服务已上线(本行仅播报配置,不代表删除任何内容;"
+            "删除事件逐行以「删除[原因] 对象(状态,大小)」记录):"
+            "周期清扫 %s、按天保留 %d 天、配额上限 %s、水位阈值 %s%s、作业根 %s",
             f"{interval_s}s" if interval_s > 0 else "关",
-            f"阈值 {self._settings.storage.min_free_gb:g}G" if watch_disk else "关",
+            storage.retention_days,
+            f"{storage.max_total_gb:g}G" if storage.max_total_gb > 0 else "关",
+            f"{storage.min_free_gb:g}G" if watch_disk else "关",
+            ";无后台任务,仅启动这一轮" if no_task else "",
             self._settings.jobs_root,
         )
+        active = self._queue.active_job_ids()
+        await asyncio.to_thread(run_sweep_once, self._settings, active)
+        if no_task:
+            return
+        self._task = asyncio.create_task(self._run(), name="hip-storage-sweeper")
 
     async def stop(self) -> None:
         """取消后台任务并等待收尸(幂等,未建任务时为空操作)。"""
