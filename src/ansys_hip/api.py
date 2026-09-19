@@ -188,7 +188,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 忘配置的部署在启动日志第一时间暴露
     if not resolved_settings.auth.api_keys:
         logger.warning(
-            "auth.api_keys 为空:fail-closed 生效,除 /health 外全部请求将返回 401;"
+            "auth.api_keys 为空:fail-closed 生效,除 /health 与面板壳外全部请求将返回 401;"
             "请配置 auth.api_keys 或环境变量 HIP_SERVICE_API_KEYS"
         )
     # 开关式 CORS(server.cors_origins,默认空 = 不挂,行为不变):供前端页面

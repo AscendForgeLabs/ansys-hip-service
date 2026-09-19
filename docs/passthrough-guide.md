@@ -736,9 +736,11 @@ passthrough = **部署面上的任意 APDL 执行**(`/SYS` 可执行系统命令
 - 配置:`config/service.yaml` 的 `auth.api_keys`(列表,多 key 并存支持无痕轮换)
   或环境变量 `HIP_SERVICE_API_KEYS`(逗号分隔);**yaml 已入 git,真实 key 走环境变量**,
   例:`HIP_SERVICE_API_KEYS=$(openssl rand -hex 32)`;
-- 已知影响:`/panel` 运维面板与 `/docs` 在浏览器直接打开会 401(浏览器无法带
-  自定义头),需 curl 或浏览器头注入插件;跨域回放组件须配置 CORS
-  `allow_headers`(服务端已放行 `X-API-Key`)并自行携带 key。
+- 豁免面:`/health`、根跳转 `/` 与 `/panel` 静态壳(无敏感数据);面板 JS 内嵌
+  key 输入——首次 401 弹窗输入一次,存 sessionStorage(关标签页即清),全部
+  数据请求(含取消作业)自动携带;`/docs` 在浏览器直接打开仍 401,需 curl 或
+  浏览器头注入插件;跨域回放组件须配置 CORS `allow_headers`(服务端已放行
+  `X-API-Key`)并自行携带 key。
 
 ```bash
 # 全部业务请求带 key(示例:上传 + 提交)

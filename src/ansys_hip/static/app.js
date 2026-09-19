@@ -53,6 +53,38 @@ function el(tag, className, text) {
 }
 
 // ===== fetch 层 =====
+// 鉴权:面板静态壳公开,数据端点(/jobs、日志、取消)要求 X-API-Key。
+// 密钥存 sessionStorage(关标签页即清);首次遇 401 弹窗输入一次并重试,
+// 密钥错误则清空存储并按原状态返回(错误条提示,点"立即刷新"可重新输入,
+// 轮询不会连环弹窗)。
+const API_KEY_STORAGE = "hip_panel_api_key";
+
+function authHeaders() {
+  const key = sessionStorage.getItem(API_KEY_STORAGE);
+  return key ? { "X-API-Key": key } : {};
+}
+
+function promptApiKey() {
+  const key = window.prompt("服务已启用 API Key 鉴权,请输入访问密钥(本标签页只需输入一次):");
+  if (key) sessionStorage.setItem(API_KEY_STORAGE, key.trim());
+  return key ? key.trim() : null;
+}
+
+// 全部出站请求的统一入口:注入鉴权头 + 401 时的一次性密钥补采与重试
+async function apiFetch(url, options = {}) {
+  const merged = { ...options, headers: { ...(options.headers || {}), ...authHeaders() } };
+  let resp = await fetch(url, merged);
+  if (resp.status === 401 && !sessionStorage.getItem(API_KEY_STORAGE)) {
+    const key = promptApiKey();
+    if (key) {
+      merged.headers["X-API-Key"] = key;
+      resp = await fetch(url, merged);
+      if (resp.status === 401) sessionStorage.removeItem(API_KEY_STORAGE); // 密钥无效:清空待重输
+    }
+  }
+  return resp;
+}
+
 async function readErrorBody(resp) {
   // 错误体统一 {code, message};解析失败退回 HTTP 状态描述
   let code = "HTTP_" + resp.status;
@@ -72,20 +104,20 @@ async function readErrorBody(resp) {
 }
 
 async function fetchJson(url) {
-  const resp = await fetch(url);
+  const resp = await apiFetch(url);
   if (!resp.ok) throw await readErrorBody(resp);
   return resp.json();
 }
 
 async function fetchText(url) {
-  const resp = await fetch(url);
+  const resp = await apiFetch(url);
   if (!resp.ok) throw await readErrorBody(resp);
   return resp.text();
 }
 
 // 日志专用拉取:服务端对超 2MB 文件缺省截尾 2000 行并带 X-Log-Truncated 头
 async function fetchLog(url) {
-  const resp = await fetch(url);
+  const resp = await apiFetch(url);
   if (!resp.ok) throw await readErrorBody(resp);
   return {
     text: await resp.text(),
@@ -292,7 +324,7 @@ function stopButton(job) {
     button.disabled = true;
     button.textContent = "中断中…";
     try {
-      const resp = await fetch("/jobs/" + job.id + "/cancel", { method: "POST" });
+      const resp = await apiFetch("/jobs/" + job.id + "/cancel", { method: "POST" });
       if (!resp.ok) throw await readErrorBody(resp);
     } catch (err) {
       showError("强制中断失败:" + err.message);

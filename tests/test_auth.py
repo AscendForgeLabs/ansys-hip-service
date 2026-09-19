@@ -96,6 +96,16 @@ def test_health_exempt_without_key(settings: Settings) -> None:
     assert resp.json()["status"] == "degraded"
 
 
+@pytest.mark.parametrize("path", ["/", "/panel", "/panel/", "/panel/app.js"])
+def test_panel_shell_exempt_without_key(settings: Settings, path: str) -> None:
+    """面板静态壳豁免:HTML/JS/CSS 无 key 可达,否则浏览器加载不出页面、
+    面板 JS 的 key 输入逻辑无从运行。数据端点(/jobs 等)仍全鉴权。"""
+    with _client(
+        _auth_settings(settings, ("secret-key",)), headers={}
+    ) as client:
+        assert client.get(path).status_code in {200, 307}, f"{path} 面板壳未豁免"
+
+
 def test_options_exempt(settings: Settings) -> None:
     """OPTIONS 豁免:CORS 预检不带自定义头,须穿过鉴权交给路由/CORS。"""
     with _client(
@@ -128,10 +138,11 @@ def test_preflight_passes_with_cors_enabled(settings: Settings) -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["/", "/docs", "/openapi.json", "/panel/", "/jobs", "/sim/methods", "/service/log"],
+    ["/docs", "/openapi.json", "/jobs", "/sim/methods", "/service/log", "/service/sweep-log"],
 )
 def test_protected_surface(settings: Settings, path: str) -> None:
-    """保护面覆盖:除 /health 外全部端点无 key 一律 401(含文档/面板/根重定向)。"""
+    """保护面覆盖:除 /health、/ 与面板静态壳外全部端点无 key 一律 401
+    (含 Swagger 文档;面板壳豁免见 test_panel_shell_exempt_without_key)。"""
     with _client(
         _auth_settings(settings, ("secret-key",)), headers={}
     ) as client:
