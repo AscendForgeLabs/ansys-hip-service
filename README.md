@@ -9,6 +9,9 @@ HIP 仿真**纯 MAPDL 转发器** — 面向 HIPForm 的 ANSYS/MAPDL 计算运�
 > 原有 12 个类型化方法 API 已整体移除、不再兼容(上游确认完全跟随本服务)。
 > **安全门槛**:passthrough 是任意 APDL 执行面(可读写文件、起系统命令),开关默认关、
 > 仅纯内网允许开启;公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。
+> 全端点已启用 **API Key 鉴权**(`X-API-Key` 请求头,fail-closed:未配置 key 时除
+> `/health` 外全部 401;配置见 `config/service.yaml` auth 节或环境变量
+> `HIP_SERVICE_API_KEYS`)。已知回归:`/panel` 面板与 `/docs` 浏览器直开 401。
 
 ## 快速开始
 

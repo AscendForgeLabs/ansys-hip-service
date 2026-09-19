@@ -3,7 +3,7 @@
 # 所有路径均可被同名环境变量覆盖(见 settings.py: HIP_SERVICE_CONFIG / ANSYS_BIN / ANSYSLMD_LICENSE_FILE ...)
 
 server:
-  host: 0.0.0.0        # 跨机器可调用(内网免鉴权,勿暴露公网)
+  host: 0.0.0.0        # 跨机器可调用;已启用 API Key 鉴权(见 auth 节),公网暴露仍需另行评估
   port: 8010
   cors_origins: []     # 跨域放行源(如 ["http://前端:3000"]),默认关 = 不挂 CORS;
                        # 前端 hip-playback 回放组件跨域拉工件时开启;只放行 GET
@@ -39,3 +39,10 @@ methods:
 passthrough:
   enabled: false
 
+# API Key 鉴权(fail-closed):除 /health 与 CORS 预检 OPTIONS 外,全部端点要求
+# X-API-Key 请求头(含 /docs、/panel、/sim/*、/jobs/*、/uploads/*、/service/*)。
+# api_keys 为空 = 拒绝一切(不是关闭鉴权);多 key 并存可无痕轮换。
+# 本文件已入 git:真实 key 一律经环境变量 HIP_SERVICE_API_KEYS 注入(逗号分隔),
+# 例:HIP_SERVICE_API_KEYS=$(openssl rand -hex 32)
+auth:
+  api_keys: []
