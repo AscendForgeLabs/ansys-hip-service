@@ -42,6 +42,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import __version__, registry
 from .access_log import configure_access_logging, make_access_log_middleware
+from .auth import make_api_key_middleware
 from .logtail import read_log_view
 from .queue import (
     ACTIVE_STATUSES,
@@ -79,7 +80,9 @@ SERVICE_DESCRIPTION = (
     "服务不做任何仿真逻辑,只治理作业/队列/超时/工件;参数原样落盘作业目录\n"
     "`resolved-params.json`,保证可追溯。\n\n"
     "内置运维面板:`/panel`(作业列表/日志/服务请求日志,根路径 `/` 重定向至面板)。\n\n"
-    "单位约定:mm / MPa / s / ℃。内网免鉴权部署,请勿暴露公网。"
+    "单位约定:mm / MPa / s / ℃。API Key 鉴权部署(X-API-Key 请求头,fail-closed:"
+    "未配置 key 时除豁免面(/health、根跳转、/panel 静态壳与 OPTIONS 预检)外"
+    "全部 401);公网暴露仍建议叠加网络层防护。"
 )
 
 # 内嵌运维面板静态资源目录(原生 JS 单页,零构建;目录缺失时挂载即启动失败,
@@ -122,6 +125,7 @@ def _log_response(path: Path, tail: int | None) -> PlainTextResponse:
 # 非业务 HTTPException(路由未命中等)按状态码兜底的错误码
 _CODE_BY_STATUS: dict[int, str] = {
     400: "INVALID_PARAMS",
+    401: "UNAUTHORIZED",
     404: "NOT_FOUND",
     405: "METHOD_NOT_ALLOWED",
     413: "PAYLOAD_TOO_LARGE",
@@ -181,16 +185,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_uvicorn_logging(resolved_settings)
     # 存储清理日志聚焦视图(service_log 同目录 sweep.log,双写不替代)
     configure_sweep_logging(resolved_settings)
+    # 鉴权 fail-closed 显著告警:空 keys 不是"关闭鉴权"而是"拒绝一切",
+    # 忘配置的部署在启动日志第一时间暴露
+    if not resolved_settings.auth.api_keys:
+        logger.warning(
+            "auth.api_keys 为空:fail-closed 生效,除 /health 与面板壳外全部请求将返回 401;"
+            "请配置 auth.api_keys 或环境变量 HIP_SERVICE_API_KEYS"
+        )
     # 开关式 CORS(server.cors_origins,默认空 = 不挂,行为不变):供前端页面
     # (如 hip-playback 回放组件)跨域拉取工件;只放行 GET(只读端点足够)。
     # 注意挂载顺序:add_middleware 是前插(insert(0)),后挂者在外层 —— 访问日志
     # 必须最后挂,预检 OPTIONS 才会被 CORSMiddleware 短路之前先落日志
     # (实测:顺序反了预检不落日志,违背"全部请求一字不漏"承诺)。
+    # API Key 鉴权在 CORS 之前挂(= 鉴权更内层):CORS 在外层短路预检使其
+    # 不必带 key;401 回包出站经 CORS 补 Access-Control-Allow-* 头(跨域前端
+    # 可读错误体);访问日志最外层,401 攻击也一字不漏落日志。
+    app.middleware("http")(make_api_key_middleware(resolved_settings.auth))
     if resolved_settings.server.cors_origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(resolved_settings.server.cors_origins),
             allow_methods=["GET"],
+            allow_headers=["X-API-Key"],  # 预检放行鉴权头,否则浏览器拦跨域请求
         )
     app.middleware("http")(make_access_log_middleware())
     app.include_router(_health_router(resolved_settings, queue))

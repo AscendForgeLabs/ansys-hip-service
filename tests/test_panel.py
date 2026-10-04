@@ -28,6 +28,14 @@ def test_panel_assets_served(client: TestClient) -> None:
         assert response.text.strip(), asset
 
 
+def test_panel_script_carries_api_key_logic(client: TestClient) -> None:
+    """面板脚本内嵌鉴权逻辑:全部数据请求注入 X-API-Key 头,401 时经
+    sessionStorage 提供密钥并重试(面板壳公开、数据端点仍全鉴权的前端侧)。"""
+    script = client.get("/panel/app.js").text
+    assert '"X-API-Key"' in script, "面板脚本应注入 X-API-Key 请求头"
+    assert "sessionStorage" in script, "密钥应存 sessionStorage(关标签页即清)"
+
+
 def test_panel_without_trailing_slash_redirects(client: TestClient) -> None:
     """GET /panel → 307 → /panel/(挂载规范化重定向)。"""
     response = client.get("/panel", follow_redirects=False)

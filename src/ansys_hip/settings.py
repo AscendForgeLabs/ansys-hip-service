@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     ValidationError,
     field_validator,
     model_validator,
@@ -31,6 +32,7 @@ ENV_OVERRIDES: tuple[tuple[str, str, str], ...] = (
     ("HIP_SERVICE_JOBS_DIR", "storage", "jobs_dir"),
     ("HIP_SERVICE_PASSTHROUGH_ENABLED", "passthrough", "enabled"),
     ("HIP_SERVICE_CORS_ORIGINS", "server", "cors_origins"),
+    ("HIP_SERVICE_API_KEYS", "auth", "api_keys"),
 )
 
 
@@ -123,6 +125,36 @@ class PassthroughConfig(BaseModel):
     enabled: bool = False
 
 
+class AuthConfig(BaseModel):
+    """API Key 鉴权(fail-closed:api_keys 为空 = 除 /health 与 OPTIONS 外全部 401)。
+
+    多 key 并存即配置级轮换:追加新 key → 客户端切换 → 移除旧 key,零代码轮换。
+    真实 key 不入 git(config/service.yaml 已入库,生产值走环境变量
+    HIP_SERVICE_API_KEYS,逗号分隔)。元素为 SecretStr:配置对象整体 repr/落日志
+    自动脱敏,防明文 key 意外进 service.log(经 /service/log 可读)。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    api_keys: tuple[SecretStr, ...] = ()
+
+    @field_validator("api_keys", mode="before")
+    @classmethod
+    def _split_env_string(cls, value: object) -> object:
+        """兼容环境变量传入的逗号分隔字符串("a, b" → ("a","b"));列表/元组
+        须全为字符串——YAML 1.1 会把裸 0123/true 解析为数值/布尔,显式拒绝
+        (pydantic 默认会静默 str() 强转,造成"配置看着对、比对永远不中")。"""
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        if isinstance(value, (list, tuple)):
+            if not all(isinstance(item, str) for item in value):
+                raise ValueError(
+                    "auth.api_keys 元素必须是字符串(YAML 中请引号包裹,防 0123/true 被解析为数值/布尔)"
+                )
+            return tuple(value)
+        return value
+
+
 class AccessLogConfig(BaseModel):
     """请求访问日志配置(独立完整服务日志:全部请求一字不漏,含 /health
     轮询、静态资源与 404;按天午夜轮转,面板 GET /service/log 可查)。"""
@@ -158,6 +190,7 @@ class Settings(BaseModel):
     storage: StorageConfig = StorageConfig()
     methods: MethodsConfig = MethodsConfig()
     passthrough: PassthroughConfig = PassthroughConfig()
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     access_log: AccessLogConfig = Field(default_factory=AccessLogConfig)
     service_log: ServiceLogConfig = Field(default_factory=ServiceLogConfig)
     config_path: Path = DEFAULT_CONFIG_PATH
@@ -251,7 +284,9 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
         if not section:  # HIP_SERVICE_CONFIG 已在路径解析阶段处理
             continue
         value = os.environ.get(env_name)
-        if value is None:
+        if value is None or value == "":
+            # 空串视为未设置:防 env_file/wrapper 脚本残留的 "VAR=" 空赋值
+            # 静默清空 yaml 已配置的值(如 HIP_SERVICE_API_KEYS= 清掉全部 key)
             continue
         result = {**result, section: {**result.get(section, {}), key: value}}
     return result
