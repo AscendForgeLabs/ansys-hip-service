@@ -171,8 +171,13 @@ passthrough 是**唯一提交通道**(`POST /sim/passthrough`,结果
 
 ### 3.1 第一步:上传文件(逐文件)
 
+> 以下全部示例假设已设置 shell 变量 `HIP_KEY`(服务开启鉴权后必带):
+> `HIP_KEY=$(openssl rand -hex 32)` 换成真实部署签发的 key,或导出
+> `HIP_KEY` 为 `HIP_SERVICE_API_KEYS` 中任一值。
+
+
 ```bash
-curl -s -F 'file=@capsule_shrink.inp' http://localhost:8010/uploads/apdl
+curl -s -H "X-API-Key: $HIP_KEY" -F 'file=@capsule_shrink.inp' http://localhost:8010/uploads/apdl
 # → 200 {"path": "/var/uploads/Ab3x..._capsule_shrink.inp", "size_bytes": 4831}
 ```
 
@@ -189,6 +194,7 @@ curl -s -F 'file=@capsule_shrink.inp' http://localhost:8010/uploads/apdl
 
 ```bash
 curl -s -X POST http://localhost:8010/sim/passthrough \
+  -H "X-API-Key: $HIP_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"params": {
         "entry_file": "/var/uploads/Ab3x..._capsule_shrink.inp",
@@ -219,7 +225,7 @@ curl -s -X POST http://localhost:8010/sim/passthrough \
 ### 3.3 第三步:轮询状态(含 stages)
 
 ```bash
-curl -s http://localhost:8010/jobs/9d2f...
+curl -s -H "X-API-Key: $HIP_KEY" http://localhost:8010/jobs/9d2f...
 ```
 
 ```json
@@ -253,7 +259,7 @@ curl -s http://localhost:8010/jobs/9d2f...
 
 ```bash
 # 结果 JSON(仅 succeeded;未完成 409 RESULT_NOT_READY,失败 409 JOB_FAILED)
-curl -s http://localhost:8010/jobs/9d2f.../result
+curl -s -H "X-API-Key: $HIP_KEY" http://localhost:8010/jobs/9d2f.../result
 # → {"fidelity": "passthrough",
 #     "artifacts": ["capsule_shrink.inp","deform.csv","frame_1.csv","job.out",
 #                   "progress.csv","results.csv"],
@@ -262,13 +268,13 @@ curl -s http://localhost:8010/jobs/9d2f.../result
 #                 "shrink_r": 2.4107E-02, "p_final": 1.2000E+02}}
 
 # 工件列表(裸文件名数组,与 result.artifacts 一致)
-curl -s http://localhost:8010/jobs/9d2f.../artifacts
+curl -s -H "X-API-Key: $HIP_KEY" http://localhost:8010/jobs/9d2f.../artifacts
 
 # 单个工件流式下载(大文件边下边写,不整读内存)
-curl -s -O http://localhost:8010/jobs/9d2f.../artifacts/deform.csv
+curl -s -H "X-API-Key: $HIP_KEY" -O http://localhost:8010/jobs/9d2f.../artifacts/deform.csv
 
 # 作业日志(纯文本):job.log=服务簿记事件,job.out=MAPDL 求解输出(运行中也可看)
-curl -s "http://localhost:8010/jobs/9d2f.../log?source=job.out&tail=50"
+curl -s -H "X-API-Key: $HIP_KEY" "http://localhost:8010/jobs/9d2f.../log?source=job.out&tail=50"
 ```
 
 passthrough 结果 JSON 字段:
@@ -727,7 +733,8 @@ passthrough = **部署面上的任意 APDL 执行**(`/SYS` 可执行系统命令
 
 除 `GET /health` 与 `OPTIONS` 请求(CORS 预检不带自定义头;含 CORS 未挂载时的
 裸 OPTIONS,穿过鉴权即 405)外,**全部端点要求 `X-API-Key` 请求头**
-(含 `/docs`、`/panel`、`/uploads/*`、`/sim/*`、`/jobs/*`、`/service/*`):
+(含 `/docs`、`/openapi.json`、`/uploads/*`、`/sim/*`、`/jobs/*`、`/service/*`;
+`/panel` 静态壳见下方豁免面):
 缺失或错误一律 `401`,响应体为统一错误信封 `{"code": "UNAUTHORIZED", "message": "..."}`,
 三种情形(服务未配置 key / 请求缺头 / key 无效)message 各不相同,便于排障。
 

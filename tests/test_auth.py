@@ -13,6 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ansys_hip.api import create_app
+from pydantic import ValidationError
+
 from ansys_hip.settings import AuthConfig, Settings, load_settings
 
 REAL_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "service.yaml"
@@ -188,3 +190,31 @@ def test_auth_config_masks_secrets() -> None:
     """key 为 SecretStr:配置对象 repr 不含明文(防意外落日志)。"""
     config = AuthConfig(api_keys=("s3cret",))
     assert "s3cret" not in repr(config)
+
+
+@pytest.mark.parametrize("path", ["/panelfoo", "/panel-admin", "/panels"])
+def test_panel_prefix_boundary_not_exempt(settings: Settings, path: str) -> None:
+    """同前缀异段路径(/panelfoo 等)不豁免:段边界匹配,无 key 时 401 而非穿到路由。"""
+    with _client(_auth_settings(settings, ("secret-key",)), headers={}) as client:
+        resp = client.get(path)
+    assert resp.status_code == 401
+
+
+def test_empty_env_api_keys_keeps_yaml_keys(monkeypatch, tmp_path: Path) -> None:
+    """HIP_SERVICE_API_KEYS 空串视为未设置:不清空 yaml 已配置的 key。"""
+    cfg = tmp_path / "service.yaml"
+    cfg.write_text(
+        "auth:\n  api_keys: ['yaml-key']\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HIP_SERVICE_CONFIG", str(cfg))
+    monkeypatch.setenv("HIP_SERVICE_API_KEYS", "")
+    settings = load_settings()
+    assert _plain(settings.auth.api_keys) == ("yaml-key",)
+
+
+def test_api_keys_rejects_non_string_elements() -> None:
+    """YAML 裸 0123/true 会被解析为数值/布尔:非字符串元素显式拒绝(pydantic 默认会静默 str() 强转)。"""
+    with pytest.raises(ValidationError):
+        AuthConfig(api_keys=[123])
+    with pytest.raises(ValidationError):
+        AuthConfig(api_keys=[True])

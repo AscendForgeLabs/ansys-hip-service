@@ -141,9 +141,17 @@ class AuthConfig(BaseModel):
     @field_validator("api_keys", mode="before")
     @classmethod
     def _split_env_string(cls, value: object) -> object:
-        """兼容环境变量传入的逗号分隔字符串("a, b" → ("a","b"));列表/元组原样。"""
+        """兼容环境变量传入的逗号分隔字符串("a, b" → ("a","b"));列表/元组
+        须全为字符串——YAML 1.1 会把裸 0123/true 解析为数值/布尔,显式拒绝
+        (pydantic 默认会静默 str() 强转,造成"配置看着对、比对永远不中")。"""
         if isinstance(value, str):
             return tuple(part.strip() for part in value.split(",") if part.strip())
+        if isinstance(value, (list, tuple)):
+            if not all(isinstance(item, str) for item in value):
+                raise ValueError(
+                    "auth.api_keys 元素必须是字符串(YAML 中请引号包裹,防 0123/true 被解析为数值/布尔)"
+                )
+            return tuple(value)
         return value
 
 
@@ -276,7 +284,9 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
         if not section:  # HIP_SERVICE_CONFIG 已在路径解析阶段处理
             continue
         value = os.environ.get(env_name)
-        if value is None:
+        if value is None or value == "":
+            # 空串视为未设置:防 env_file/wrapper 脚本残留的 "VAR=" 空赋值
+            # 静默清空 yaml 已配置的值(如 HIP_SERVICE_API_KEYS= 清掉全部 key)
             continue
         result = {**result, section: {**result.get(section, {}), key: value}}
     return result

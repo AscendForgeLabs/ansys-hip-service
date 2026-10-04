@@ -29,13 +29,16 @@ UNAUTHORIZED = "UNAUTHORIZED"
 # 精确豁免路径(探针用精确路径,不做尾斜杠宽容);根 / 仅 307 重定向到面板壳
 EXEMPT_PATHS = frozenset({"/", "/health"})
 # 前缀豁免:/panel 静态挂载(HTML/JS/CSS,无敏感数据;StaticFiles 独占该前缀,
-# 不会命中业务端点,无旁路)
+# 不会命中业务端点,无旁路)。按段边界匹配:仅 /panel 本身与 /panel/* 豁免,
+# /panelfoo 之类同前缀异段路径不豁免 —— 防未来新增 /panel-xxx 路由被静默免鉴权
 EXEMPT_PREFIXES = ("/panel",)
 
 
 def _is_exempt(path: str) -> bool:
-    """请求路径是否落在鉴权豁免面(精确路径或 /panel 前缀)。"""
-    return path in EXEMPT_PATHS or path.startswith(EXEMPT_PREFIXES)
+    """请求路径是否落在鉴权豁免面(精确路径或 /panel 段边界前缀)。"""
+    return path in EXEMPT_PATHS or any(
+        path == prefix or path.startswith(prefix + "/") for prefix in EXEMPT_PREFIXES
+    )
 
 
 def _unauthorized(message: str) -> JSONResponse:

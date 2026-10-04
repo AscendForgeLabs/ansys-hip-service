@@ -8,7 +8,7 @@ HIP 仿真**纯 MAPDL 转发器** — 面向 HIPForm 的 ANSYS/MAPDL 计算运�
 
 上游对接契约的唯一入口是 `docs/passthrough-guide.md`(`POST /uploads/apdl` 上传、`declared_outputs` 声明输出、`progress.csv` 阶段侧车、`results.csv` 结构化结果;示范工程在 `docs/examples/passthrough-demo/`);消费侧三维回放手册在 `docs/playback-handbook.md`(帧数据语义/渲染配方/生态选项,含 `playback/` 参考实现)。
 
-**安全门槛**:passthrough = 任意 APDL 执行面(可读写文件、起系统命令),开关默认 `false`(`config/service.yaml`,环境变量 `HIP_SERVICE_PASSTHROUGH_ENABLED` 可覆盖),仅纯内网允许开启,公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。全端点已启用 **API Key 鉴权**(中间件 `auth.py`,`X-API-Key` 请求头,**fail-closed**:`auth.api_keys` 为空时除 `/health` 与 OPTIONS 外全部 401,空配置=拒绝一切而非关闭鉴权;环境变量 `HIP_SERVICE_API_KEYS` 逗号分隔,多 key 支持轮换;鉴权中间件挂载在 CORS 之内、路由之外)。豁免面:`/health`、根跳转 `/` 与面板静态壳 `/panel*`(面板 JS 内嵌 key 输入,首次 401 弹窗一次存 sessionStorage);`/docs` 浏览器直开仍 401(浏览器无法带自定义头)。
+**安全门槛**:passthrough = 任意 APDL 执行面(可读写文件、起系统命令),开关默认 `false`(`config/service.yaml`,环境变量 `HIP_SERVICE_PASSTHROUGH_ENABLED` 可覆盖),仅纯内网允许开启,公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。全端点已启用 **API Key 鉴权**(中间件 `auth.py`,`X-API-Key` 请求头,**fail-closed**:`auth.api_keys` 为空时除豁免面外全部 401,空配置=拒绝一切而非关闭鉴权;环境变量 `HIP_SERVICE_API_KEYS` 逗号分隔,多 key 支持轮换;鉴权中间件挂载在 CORS 之内、路由之外)。豁免面:`/health`、根跳转 `/`、面板静态壳 `/panel`(含 `/panel/*`,按段边界匹配)与 OPTIONS 预检;面板 JS 内嵌 key 输入(首次 401 弹窗一次存 sessionStorage,失效/输错后点"立即刷新"重输);`/docs` 浏览器直开仍 401(浏览器无法带自定义头)。
 
 ## 常用命令
 

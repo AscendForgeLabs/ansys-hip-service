@@ -10,7 +10,7 @@ HIP 仿真**纯 MAPDL 转发器** — 面向 HIPForm 的 ANSYS/MAPDL 计算运�
 > **安全门槛**:passthrough 是任意 APDL 执行面(可读写文件、起系统命令),开关默认关、
 > 仅纯内网允许开启;公网隧道期间必须关闭(关闭时提交得 403 `PASSTHROUGH_DISABLED`)。
 > 全端点已启用 **API Key 鉴权**(`X-API-Key` 请求头,fail-closed:未配置 key 时除
-> `/health` 外全部 401;配置见 `config/service.yaml` auth 节或环境变量
+> 豁免面(`/health`、根跳转、`/panel` 静态壳、OPTIONS 预检)外全部 401;配置见 `config/service.yaml` auth 节或环境变量
 > `HIP_SERVICE_API_KEYS`)。面板 `/panel` 静态壳免鉴权可达,数据请求首次 401 时弹窗输入 key 一次
 > (存 sessionStorage,关标签页即清);`/docs` 浏览器直开仍 401。
 

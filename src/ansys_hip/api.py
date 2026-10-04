@@ -81,7 +81,8 @@ SERVICE_DESCRIPTION = (
     "`resolved-params.json`,保证可追溯。\n\n"
     "内置运维面板:`/panel`(作业列表/日志/服务请求日志,根路径 `/` 重定向至面板)。\n\n"
     "单位约定:mm / MPa / s / ℃。API Key 鉴权部署(X-API-Key 请求头,fail-closed:"
-    "未配置 key 时除 /health 外全部 401);公网暴露仍建议叠加网络层防护。"
+    "未配置 key 时除豁免面(/health、根跳转、/panel 静态壳与 OPTIONS 预检)外"
+    "全部 401);公网暴露仍建议叠加网络层防护。"
 )
 
 # 内嵌运维面板静态资源目录(原生 JS 单页,零构建;目录缺失时挂载即启动失败,

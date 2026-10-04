@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """passthrough 示范提交脚本 — 上传 → 提交 → 轮询(status+stages)→ 下载工件.
 
+鉴权:服务开启 API Key 后,导出 HIP_SERVICE_API_KEYS=<key>(脚本自动带 X-API-Key;
+下方等价 curl 未标注,联调时请自行加 -H "X-API-Key: <key>")。
+
 等价 curl(逐阶段):
   # 1) 上传入口 .inp(multipart;附属 .cdb 同法逐个上传)
   curl -s -F 'file=@capsule_shrink.inp' http://localhost:8010/uploads/apdl
@@ -39,6 +42,7 @@ declared_outputs 说明(契约见 docs/passthrough-guide.md §4.3):
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -148,7 +152,11 @@ def fetch_result_and_artifacts(client: httpx.Client, base_url: str, job_id: str)
 
 def main() -> None:
     base_url = sys.argv[1] if len(sys.argv) > 1 else BASE_URL_DEFAULT
-    with httpx.Client(timeout=60) as client:
+    # 鉴权:服务开启 API Key 后必带;取环境变量 HIP_SERVICE_API_KEYS 首个值
+    # (与服务端同名,可直接复用部署配置)
+    api_key = os.environ.get("HIP_SERVICE_API_KEYS", "").split(",")[0].strip()
+    headers = {"X-API-Key": api_key} if api_key else None
+    with httpx.Client(timeout=60, headers=headers) as client:
         entry_path = upload_entry(client, base_url)
         job_id = submit(client, base_url, entry_path)
         poll_until_done(client, base_url, job_id)

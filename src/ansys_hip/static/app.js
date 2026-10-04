@@ -53,33 +53,52 @@ function el(tag, className, text) {
 }
 
 // ===== fetch 层 =====
-// 鉴权:面板静态壳公开,数据端点(/jobs、日志、取消)要求 X-API-Key。
-// 密钥存 sessionStorage(关标签页即清);首次遇 401 弹窗输入一次并重试,
-// 密钥错误则清空存储并按原状态返回(错误条提示,点"立即刷新"可重新输入,
-// 轮询不会连环弹窗)。
+// 鉴权:面板静态壳公开,数据端点(/jobs、日志、取消、工件下载)要求 X-API-Key。
+// 密钥存 sessionStorage(关标签页即清);遇 401:无密钥或存储密钥已失效(服务端
+// 轮换/撤销)时清空并弹窗输入、重试一次;取消输入或输入无效后不再自动弹窗
+// (错误条提示),点"立即刷新"复位后可重新输入。
 const API_KEY_STORAGE = "hip_panel_api_key";
+// 弹窗抑制闩:用户取消/输错后置位,防 3s 轮询连环弹窗;手动"立即刷新"复位
+let promptDismissed = false;
+// window.prompt 模态期间并发 401 不叠加弹窗(双保险)
+let promptOpen = false;
 
-function authHeaders() {
+function isSameOrigin(url) {
+  // 鉴权头只发同源(相对路径按页面 origin 解析),防密钥外带
+  return new URL(url, location.href).origin === location.origin;
+}
+
+function authHeaders(url) {
   const key = sessionStorage.getItem(API_KEY_STORAGE);
-  return key ? { "X-API-Key": key } : {};
+  return key && isSameOrigin(url) ? { "X-API-Key": key } : {};
 }
 
 function promptApiKey() {
-  const key = window.prompt("服务已启用 API Key 鉴权,请输入访问密钥(本标签页只需输入一次):");
-  if (key) sessionStorage.setItem(API_KEY_STORAGE, key.trim());
-  return key ? key.trim() : null;
+  const raw = window.prompt("服务已启用 API Key 鉴权,请输入访问密钥(本标签页只需输入一次):");
+  const key = raw === null ? "" : raw.trim();
+  if (key) sessionStorage.setItem(API_KEY_STORAGE, key);
+  return key || null;
 }
 
 // 全部出站请求的统一入口:注入鉴权头 + 401 时的一次性密钥补采与重试
 async function apiFetch(url, options = {}) {
-  const merged = { ...options, headers: { ...(options.headers || {}), ...authHeaders() } };
+  const merged = { ...options, headers: { ...(options.headers || {}), ...authHeaders(url) } };
   let resp = await fetch(url, merged);
-  if (resp.status === 401 && !sessionStorage.getItem(API_KEY_STORAGE)) {
-    const key = promptApiKey();
-    if (key) {
-      merged.headers["X-API-Key"] = key;
-      resp = await fetch(url, merged);
-      if (resp.status === 401) sessionStorage.removeItem(API_KEY_STORAGE); // 密钥无效:清空待重输
+  if (resp.status === 401 && !promptOpen && !promptDismissed) {
+    sessionStorage.removeItem(API_KEY_STORAGE); // 无密钥或旧密钥已失效:清空后统一走输入
+    promptOpen = true;
+    try {
+      const key = promptApiKey();
+      if (key && isSameOrigin(url)) {
+        merged.headers["X-API-Key"] = key;
+        resp = await fetch(url, merged);
+      }
+      if (resp.status === 401) {
+        sessionStorage.removeItem(API_KEY_STORAGE); // 未输入或输入无效:清空,错误条提示
+        promptDismissed = true;
+      }
+    } finally {
+      promptOpen = false;
     }
   }
   return resp;
@@ -459,9 +478,26 @@ function artifactsUrl(job) {
 function appendArtifactLink(list, job, name) {
   const link = el("a", null, name);
   link.href = artifactsUrl(job) + "/" + encodeURIComponent(name);
+  // 浏览器导航无法携带自定义头(会得 401 JSON),下载须经 apiFetch 取 blob 再存盘
+  link.addEventListener("click", (event) => downloadArtifact(event, link.href, name));
   const item = el("li");
   item.appendChild(link);
   list.appendChild(item);
+}
+
+async function downloadArtifact(event, url, name) {
+  event.preventDefault();
+  const resp = await apiFetch(url);
+  if (!resp.ok) {
+    showError("工件下载失败:" + (await readErrorBody(resp)).message);
+    return;
+  }
+  const blobUrl = URL.createObjectURL(await resp.blob());
+  const trigger = el("a");
+  trigger.href = blobUrl;
+  trigger.download = name;
+  trigger.click();
+  URL.revokeObjectURL(blobUrl);
 }
 
 async function loadArtifacts(job) {
@@ -687,7 +723,10 @@ function bindToolbarEvents() {
     state = { ...state, intervalMs: Number(event.target.value) };
     restartPollTimer();
   });
-  $("refresh-btn").addEventListener("click", () => pollOnce());
+  $("refresh-btn").addEventListener("click", () => {
+    promptDismissed = false; // 手动刷新视为重试信号:重新允许 401 弹窗输入密钥
+    pollOnce();
+  });
 }
 
 function bindTabEvents() {
