@@ -291,12 +291,16 @@ passthrough 结果 JSON 字段:
 
 ```python
 """passthrough 最小对接(httpx):上传 → 提交 → 轮询 → 取件。"""
+import os
 import time
 import httpx
 
 BASE = "http://localhost:8010"
+# 鉴权(§7.1):从环境取 key,与服务端 HIP_SERVICE_API_KEYS 同名
+API_KEY = os.environ.get("HIP_SERVICE_API_KEYS", "").split(",")[0].strip()
+HEADERS = {"X-API-Key": API_KEY} if API_KEY else None
 
-with httpx.Client(timeout=60) as client:
+with httpx.Client(timeout=60, headers=HEADERS) as client:
     # 1) 上传入口 .inp(multipart;附属文件同法逐个上传)
     with open("capsule_shrink.inp", "rb") as stream:
         uploaded = client.post(f"{BASE}/uploads/apdl",

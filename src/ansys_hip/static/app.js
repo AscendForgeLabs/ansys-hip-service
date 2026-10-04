@@ -487,17 +487,44 @@ function appendArtifactLink(list, job, name) {
 
 async function downloadArtifact(event, url, name) {
   event.preventDefault();
-  const resp = await apiFetch(url);
+  let resp;
+  try {
+    resp = await apiFetch(url);
+  } catch (err) {
+    showError("工件下载失败:" + (err && err.message ? err.message : String(err)));
+    return;
+  }
   if (!resp.ok) {
     showError("工件下载失败:" + (await readErrorBody(resp)).message);
     return;
   }
-  const blobUrl = URL.createObjectURL(await resp.blob());
-  const trigger = el("a");
-  trigger.href = blobUrl;
-  trigger.download = name;
-  trigger.click();
-  URL.revokeObjectURL(blobUrl);
+  // 工件常态是 GB 级(rst 全场/cdb/大 csv):优先 File System Access API
+  // 流式直写磁盘(零内存缓冲);不支持该 API 的浏览器回退 blob,但超 500MB
+  // 预警(blob 会整读进标签页内存,约 2GB 触顶崩溃)
+  if (window.showSaveFilePicker && resp.body) {
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: name });
+      await resp.body.pipeTo(await handle.createWritable());
+      return;
+    } catch (err) {
+      if (err && err.name === "AbortError") return; // 用户取消保存对话框
+      // 保存器异常(目录权限等):落到 blob 回退
+    }
+  }
+  const sizeMb = Number(resp.headers.get("content-length") || 0) / 1048576;
+  if (sizeMb > 500) {
+    showError("工件 " + name + " 约 " + Math.round(sizeMb) + " MB,浏览器内下载可能失败,建议用 curl(带 X-API-Key 头)直接拉取");
+  }
+  try {
+    const blobUrl = URL.createObjectURL(await resp.blob());
+    const trigger = el("a");
+    trigger.href = blobUrl;
+    trigger.download = name;
+    trigger.click();
+    URL.revokeObjectURL(blobUrl);
+  } catch (err) {
+    showError("工件下载失败:" + (err && err.message ? err.message : String(err)));
+  }
 }
 
 async function loadArtifacts(job) {

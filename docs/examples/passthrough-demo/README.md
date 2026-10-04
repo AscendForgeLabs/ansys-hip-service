@@ -20,7 +20,9 @@
 (**默认 false,仅纯内网允许开启**;公网隧道期间必须关)。服务在 `:8010`:
 
 ```bash
-# 0) 确认开关已开(否则提交得 403 PASSTHROUGH_DISABLED)
+# 0) 确认开关已开(否则提交得 403 PASSTHROUGH_DISABLED);服务开启鉴权时
+#    先导出 key(submit_demo.py 与下方 curl 都会用到,与服务端环境变量同名):
+#    export HIP_SERVICE_API_KEYS=<部署签发的 key>
 curl -s http://localhost:8010/health
 
 # 1) 跑提交脚本(上传 → 提交 → 轮询 → 下载,全自动)
@@ -31,10 +33,11 @@ python submit_demo.py http://localhost:8010
 想手动逐步跑(等价 curl 全集在 `submit_demo.py` 顶部注释):
 
 ```bash
-curl -s -F 'file=@capsule_shrink.inp' http://localhost:8010/uploads/apdl
+curl -s -H "X-API-Key: $HIP_SERVICE_API_KEYS" -F 'file=@capsule_shrink.inp' http://localhost:8010/uploads/apdl
 # → {"path": "/var/uploads/xxx_capsule_shrink.inp", "size_bytes": ...}
 
 curl -s -X POST http://localhost:8010/sim/passthrough \
+  -H "X-API-Key: $HIP_SERVICE_API_KEYS" \
   -H 'Content-Type: application/json' \
   -d '{"params": {"entry_file": "/var/uploads/xxx_capsule_shrink.inp",
         "declared_outputs": ["frame_1.csv","frame_2.csv","frame_3.csv",
@@ -42,7 +45,7 @@ curl -s -X POST http://localhost:8010/sim/passthrough \
         "workflow": "HIP_DEMO_V1", "timeout_s": 1800}}'
 # → 202 {"id": "...", "method": "passthrough", "status_url": "/jobs/..."}
 
-watch -n3 'curl -s http://localhost:8010/jobs/<id>'   # 盯 status 与 stages
+watch -n3 'curl -s -H "X-API-Key: $HIP_SERVICE_API_KEYS" http://localhost:8010/jobs/<id>'   # 盯 status 与 stages
 ```
 
 ## 预期产物
@@ -72,6 +75,7 @@ curl -s -F 'file=@vm1_axial_bar.inp' http://localhost:8010/uploads/apdl
 # → {"path": "/var/uploads/xxx_vm1_axial_bar.inp", ...}
 
 curl -s -X POST http://localhost:8010/sim/passthrough \
+  -H "X-API-Key: $HIP_SERVICE_API_KEYS" \
   -H 'Content-Type: application/json' \
   -d '{"params": {"entry_file": "/var/uploads/xxx_vm1_axial_bar.inp",
         "declared_outputs": ["disp.csv"], "workflow": "VM1_E2E"}}'
@@ -107,6 +111,7 @@ curl -s -F 'file=@vm3_thermal_support.inp' http://localhost:8010/uploads/apdl
 # → {"path": "/var/uploads/xxx_vm3_thermal_support.inp", ...}
 
 curl -s -X POST http://localhost:8010/sim/passthrough \
+  -H "X-API-Key: $HIP_SERVICE_API_KEYS" \
   -H 'Content-Type: application/json' \
   -d '{"params": {"entry_file": "/var/uploads/xxx_vm3_thermal_support.inp",
         "declared_outputs": ["disp.csv"], "workflow": "VM3_E2E"}}'
@@ -140,6 +145,7 @@ curl -s -F 'file=@cube_dent.inp' http://localhost:8010/uploads/apdl
 # → {"path": "/var/uploads/xxx_cube_dent.inp", ...}
 
 curl -s -X POST http://localhost:8010/sim/passthrough \
+  -H "X-API-Key: $HIP_SERVICE_API_KEYS" \
   -H 'Content-Type: application/json' \
   -d '{"params": {"entry_file": "/var/uploads/xxx_cube_dent.inp",
         "declared_outputs": ["frame_1.csv","frame_2.csv","frame_3.csv",
